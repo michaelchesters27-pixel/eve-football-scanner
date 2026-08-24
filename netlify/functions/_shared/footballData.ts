@@ -94,7 +94,7 @@ export function historicalCsvUrl(seasonCode: string, div: string) {
   return `https://www.football-data.co.uk/mmz4281/${seasonCode}/${div}.csv`
 }
 
-export const FIXTURES_CSV_URL = 'https://www.football-data.co.uk/fixtures.csv'
+export const FIXTURES_CSV_URL = 'https://www.football-data.co.uk/matches/resources/fixtures.csv'
 
 export function safeNumber(value: string | undefined): number | null {
   if (value == null || value === '') return null
