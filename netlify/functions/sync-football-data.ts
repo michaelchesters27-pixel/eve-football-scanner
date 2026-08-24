@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js'
+import ws from 'ws'
 import {
   FIXTURES_CSV_URL,
   LEAGUES,
@@ -191,6 +192,7 @@ async function syncLeague(
 export default async () => {
   const supabase = createClient(env('SUPABASE_URL'), env('SUPABASE_SERVICE_ROLE_KEY'), {
     auth: { persistSession: false, autoRefreshToken: false },
+    realtime: { transport: ws as any },
   })
 
   const { data: syncRun } = await supabase
