@@ -44,9 +44,15 @@ main { width: min(1180px, 92vw); margin: 0 auto; }
 .kpi-card span { color: #8ea298; font-size: 11px; }
 .kpi-card strong { font-size: 24px; margin: 2px 0; }
 .kpi-card small { color: #607069; font-size: 10px; }
-.notice { display: flex; gap: 10px; align-items: flex-start; margin: 16px 0 36px; padding: 13px 15px; border-radius: 14px; border: 1px solid rgba(234,187,80,.2); background: rgba(105,78,18,.12); color: #cabb96; font-size: 12px; line-height: 1.5; }
-.notice svg { color: #e8ba4c; flex: 0 0 auto; margin-top: 1px; }
-.notice strong { color: #f0d693; }
+
+.qualification-panel { margin: 18px 0 36px; padding: 20px; border-radius: 18px; border: 1px solid rgba(100,209,141,.2); background: linear-gradient(145deg, rgba(17,53,32,.72), rgba(8,20,13,.82)); box-shadow: 0 18px 45px rgba(0,0,0,.14); }
+.qualification-count { display: flex; align-items: center; gap: 9px; color: #76e19d; font-size: 14px; letter-spacing: .045em; }
+.qualification-count svg { flex: 0 0 auto; }
+.qualification-panel p { color: #a5b6ad; font-size: 13px; line-height: 1.65; margin: 10px 0 14px; max-width: 980px; }
+.qualification-panel p strong { color: #eef8f1; }
+.qualification-rule { display: flex; gap: 9px; align-items: flex-start; padding: 11px 13px; border-radius: 12px; background: rgba(68,179,106,.09); border: 1px solid rgba(94,212,137,.14); color: #a9c8b4; font-size: 12px; line-height: 1.5; }
+.qualification-rule svg { color: #6bdd94; flex: 0 0 auto; margin-top: 1px; }
+.qualification-rule strong { color: #dff4e6; }
 
 .scanner-section { margin: 22px 0 34px; }
 .section-head { display: flex; justify-content: space-between; gap: 20px; align-items: flex-end; margin-bottom: 16px; }
@@ -70,6 +76,21 @@ main { width: min(1180px, 92vw); margin: 0 auto; }
 .pick-card h4 span { color: #587067; font-size: 12px; margin: 0 4px; font-weight: 500; }
 .selection { display: flex; align-items: center; gap: 8px; padding: 12px 13px; border-radius: 12px; background: rgba(56,169,96,.10); color: #c9f1d6; font-size: 13px; font-weight: 800; }
 .selection svg { color: #62d38b; }
+
+.value-strip { margin-top: 10px; padding: 10px 12px; border-radius: 11px; border: 1px solid rgba(255,255,255,.08); background: rgba(255,255,255,.025); display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+.value-strip > div { display: flex; align-items: center; gap: 7px; }
+.value-strip strong { font-size: 11px; letter-spacing: .04em; }
+.value-strip span { font-size: 10px; color: #85978d; text-align: right; }
+.value-strong { border-color: rgba(82,235,136,.35); background: rgba(49,171,92,.14); color: #75eda1; }
+.value-value { border-color: rgba(107,210,143,.24); background: rgba(57,141,85,.11); color: #a2e2b8; }
+.value-no_value { border-color: rgba(224,139,79,.22); background: rgba(126,67,31,.10); color: #efb17f; }
+.value-waiting, .value-uncalibrated { border-color: rgba(152,163,159,.13); color: #a8b3ad; }
+.value-metrics { display: grid; grid-template-columns: repeat(4,1fr); gap: 7px; margin: 10px 0 4px; }
+.value-metrics div { padding: 9px; border-radius: 9px; background: rgba(255,255,255,.025); border: 1px solid rgba(255,255,255,.045); }
+.value-metrics span, .value-metrics strong { display: block; }
+.value-metrics span { color: #65786e; text-transform: uppercase; letter-spacing: .04em; font-size: 8px; }
+.value-metrics strong { color: #d7e7dc; font-size: 11px; margin-top: 3px; }
+
 .confidence-row, .quality-line { display: flex; justify-content: space-between; align-items: center; margin-top: 15px; color: #7e9388; font-size: 11px; }
 .confidence-row strong { color: #a8eabd; font-size: 17px; }
 .meter { height: 5px; background: rgba(255,255,255,.05); border-radius: 99px; overflow: hidden; margin: 7px 0 15px; }
@@ -116,5 +137,8 @@ footer { padding: 25px 5vw 34px; border-top: 1px solid rgba(144,214,167,.08); co
   .tabs { justify-content: flex-start; }
   .tabs button { font-size: 11px; }
   .evidence-grid { grid-template-columns: repeat(2,1fr); }
+  .value-strip { align-items: flex-start; flex-direction: column; }
+  .value-strip span { text-align: left; }
+  .value-metrics { grid-template-columns: repeat(2,1fr); }
   .engine-grid { grid-template-columns: 1fr; }
 }
