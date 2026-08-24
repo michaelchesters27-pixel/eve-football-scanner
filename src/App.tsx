@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from 'react'
 import { createClient } from '@supabase/supabase-js'
 import {
   Activity,
-  AlertTriangle,
   BarChart3,
   CircleDollarSign,
   CloudRain,
@@ -17,6 +16,7 @@ import {
 
 type Market = 'cards' | 'corners' | 'goals'
 type Grade = 'A+' | 'A' | 'B' | 'C'
+type ValueStatus = 'strong' | 'value' | 'no_value' | 'waiting' | 'uncalibrated'
 
 type Evidence = {
   key: string
@@ -46,6 +46,14 @@ type Pick = {
   evidence: Evidence[]
   referee?: RefereeInfo
   researchNote?: string
+  fairProbability?: number | null
+  fairOdds?: number | null
+  bestBookmaker?: string | null
+  bestOdds?: number | null
+  impliedProbability?: number | null
+  edgePct?: number | null
+  expectedValuePct?: number | null
+  valueStatus?: ValueStatus | null
 }
 
 const weights: Record<Market, Record<string, number>> = {
@@ -187,8 +195,9 @@ function App() {
           return
         }
         if (!data?.length) {
+          setPicks([])
           setDataMode('error')
-          setDataMessage('Supabase connected; no published scanner selections yet')
+          setDataMessage('Supabase connected; no qualified scanner selections yet')
           return
         }
         setPicks(data as Pick[])
@@ -202,9 +211,9 @@ function App() {
     [activeMarket, picks],
   )
 
-  const aGrade = picks.filter((pick) => pick.grade === 'A+' || pick.grade === 'A').length
-  const topScore = Math.max(...picks.map((pick) => pick.confidence))
-  const averageQuality = Math.round(picks.reduce((sum, pick) => sum + pick.dataQuality, 0) / picks.length)
+  const topScore = picks.length ? Math.max(...picks.map((pick) => pick.confidence)) : 0
+  const averageQuality = picks.length ? Math.round(picks.reduce((sum, pick) => sum + pick.dataQuality, 0) / picks.length) : 0
+  const valueCount = picks.filter((pick) => pick.valueStatus === 'value' || pick.valueStatus === 'strong').length
 
   return (
     <div className="app-shell">
@@ -236,22 +245,27 @@ function App() {
         </section>
 
         <section className="kpis">
-          <Kpi icon={Trophy} label="A / A+ selections" value={String(aGrade)} detail="Current shortlist" />
-          <Kpi icon={Sparkles} label="Top confidence" value={`${topScore}%`} detail="Research score" />
+          <Kpi icon={Trophy} label="Qualified candidates" value={String(picks.length)} detail="Passed calibrated filters" />
+          <Kpi icon={Sparkles} label="Top EVE score" value={`${topScore}%`} detail="Statistical score" />
           <Kpi icon={Database} label="Data quality" value={`${averageQuality}%`} detail="Coverage score" />
-          <Kpi icon={BarChart3} label="Markets" value="3" detail="Cards · Corners · Goals" />
+          <Kpi icon={CircleDollarSign} label="Value bets now" value={String(valueCount)} detail="VALUE / STRONG VALUE only" />
         </section>
 
-        <section className="notice">
-          <AlertTriangle size={18} />
-          <div><strong>Model v0 is not a proven betting edge.</strong> Scores are transparent research heuristics until historical backtesting and out-of-sample calibration validate them.</div>
-        </section>
+        {dataMode === 'live' && (
+          <section className="qualification-panel">
+            <div className="qualification-count"><Trophy size={20} /><strong>{picks.length} QUALIFIED FROM THE FULL SCAN</strong></div>
+            <p>
+              EVE scans every supported upcoming fixture across Yellow Cards, Corners and Goals. Only selections that pass the market-specific calibrated statistical filters appear below. These are the strongest current candidates — <strong>not automatically {picks.length} bets.</strong>
+            </p>
+            <div className="qualification-rule"><CircleDollarSign size={17} /><span><strong>Final betting rule:</strong> only VALUE or STRONG VALUE should be considered. NO VALUE = skip. WAITING PRICE = no decision yet.</span></div>
+          </section>
+        )}
 
         <section className="scanner-section">
           <div className="section-head">
             <div>
-              <div className="eyebrow">TODAY'S SCANNER</div>
-              <h3>Highest-ranked signals</h3>
+              <div className="eyebrow">CURRENT QUALIFIERS</div>
+              <h3>Strongest candidates from the full scan</h3>
             </div>
             <div className="tabs">
               <button className={activeMarket === 'all' ? 'active' : ''} onClick={() => setActiveMarket('all')}>All</button>
@@ -272,12 +286,12 @@ function App() {
           <Engine icon={Flag} title="Corner Engine" text="Corners won/conceded + venue splits + recent frequency + opponent profile + H2H." />
           <Engine icon={Goal} title="Goal Engine" text="Scoring/conceding rates + half splits + home/away + recent form + H2H + context." />
           <Engine icon={UserRoundCheck} title="Referee Engine" text="Yellow-card rate, fouls, home/away distribution, recent appointments and league baseline." />
-          <Engine icon={CloudRain} title="Context Engine" text="Weather and match context are research features only when historical testing proves value." />
-          <Engine icon={CircleDollarSign} title="Value Engine" text="Next phase: compare EVE fair probability with bookmaker price and closing-line movement." />
+          <Engine icon={CloudRain} title="Context Engine" text="Weather and match context remain research factors only where data supports them." />
+          <Engine icon={CircleDollarSign} title="Value Engine" text="Compares EVE's conservative fair probability with current bookmaker price. NO VALUE means skip the bet." />
         </section>
       </main>
 
-      <footer>EVE Football Scanner · Free-data architecture · Evidence first</footer>
+      <footer>EVE Football Scanner · Live statistical shortlist · Value filtered</footer>
     </div>
   )
 }
@@ -288,6 +302,14 @@ function Kpi({ icon: Icon, label, value, detail }: { icon: typeof Activity; labe
 
 function Engine({ icon: Icon, title, text }: { icon: typeof Activity; title: string; text: string }) {
   return <article className="engine-card"><Icon size={20} /><div><h4>{title}</h4><p>{text}</p></div></article>
+}
+
+function valueLabel(status?: ValueStatus | null) {
+  if (status === 'strong') return 'STRONG VALUE'
+  if (status === 'value') return 'VALUE'
+  if (status === 'no_value') return 'NO VALUE — SKIP'
+  if (status === 'waiting') return 'WAITING PRICE'
+  return 'WAITING CALIBRATION'
 }
 
 function PickCard({ pick, rank }: { pick: Pick; rank: number }) {
@@ -301,8 +323,26 @@ function PickCard({ pick, rank }: { pick: Pick; rank: number }) {
       <div className="league-line">{pick.country} · {pick.league} · {pick.kickoff}</div>
       <h4>{pick.homeTeam} <span>vs</span> {pick.awayTeam}</h4>
       <div className="selection"><Icon size={17} /><span>{pick.selection}</span></div>
-      <div className="confidence-row"><span>EVE research confidence</span><strong>{pick.confidence}%</strong></div>
+
+      {pick.valueStatus && (
+        <div className={`value-strip value-${pick.valueStatus}`}>
+          <div><CircleDollarSign size={16} /><strong>{valueLabel(pick.valueStatus)}</strong></div>
+          <span>{pick.bestOdds ? `${pick.bestBookmaker ?? 'Best price'} ${Number(pick.bestOdds).toFixed(2)}` : 'No compatible price available yet'}</span>
+        </div>
+      )}
+
+      <div className="confidence-row"><span>EVE statistical score</span><strong>{pick.confidence}%</strong></div>
       <div className="meter"><i style={{ width: `${pick.confidence}%` }} /></div>
+
+      {(pick.fairOdds != null || pick.bestOdds != null) && (
+        <div className="value-metrics">
+          <div><span>Fair odds</span><strong>{pick.fairOdds != null ? Number(pick.fairOdds).toFixed(2) : '—'}</strong></div>
+          <div><span>Best odds</span><strong>{pick.bestOdds != null ? Number(pick.bestOdds).toFixed(2) : '—'}</strong></div>
+          <div><span>Edge</span><strong>{pick.edgePct != null ? `${Number(pick.edgePct).toFixed(1)}%` : '—'}</strong></div>
+          <div><span>EV</span><strong>{pick.expectedValuePct != null ? `${Number(pick.expectedValuePct).toFixed(1)}%` : '—'}</strong></div>
+        </div>
+      )}
+
       <div className="evidence-grid">
         {pick.evidence.map((item) => <div className="evidence" key={`${pick.id}-${item.key}`}><span>{item.label}</span><strong>{item.display}</strong><small>{item.score}/100 factor</small></div>)}
       </div>
