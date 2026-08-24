@@ -1,6 +1,11 @@
 import { createClient } from '@supabase/supabase-js'
 import ws from 'ws'
 
+// Refresh upcoming fixtures first each morning. The rest of EVE's automatic
+// pipeline follows: stats 05:15 -> settlement 05:25 -> scan 05:35 ->
+// calibration 05:40 -> value check 05:55 (all UTC).
+export const config = { schedule: '5 5 * * *' }
+
 const SOURCE = 'fotmob'
 
 const TARGETS = [
