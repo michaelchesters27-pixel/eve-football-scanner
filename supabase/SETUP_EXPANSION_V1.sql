@@ -92,7 +92,6 @@ create index if not exists player_stats_team_fixture_idx on public.player_match_
 create index if not exists fixture_lineups_fixture_team_idx on public.fixture_lineups(fixture_id, team_id, is_starting);
 create index if not exists combo_fixture_idx on public.combo_recommendations(fixture_id, calculated_at desc);
 
--- One row per completed match. Used for empirical same-game joint probabilities.
 create or replace view public.fixture_match_flat
 with (security_invoker = true)
 as
@@ -115,15 +114,17 @@ select
   coalesce(f.home_goals,0) + coalesce(f.away_goals,0) as total_goals,
   case when coalesce(f.home_goals,0) > 0 and coalesce(f.away_goals,0) > 0 then true else false end as btts,
   coalesce(f.half_time_home_goals,0) + coalesce(f.half_time_away_goals,0) as first_half_goals,
-  (coalesce(f.home_goals,0) + coalesce(f.away_goals,0))
-    - (coalesce(f.half_time_home_goals,0) + coalesce(f.half_time_away_goals,0)) as second_half_goals
+  (coalesce(f.home_goals,0) + coalesce(f.away_goals,0)) - (coalesce(f.half_time_home_goals,0) + coalesce(f.half_time_away_goals,0)) as second_half_goals
 from public.fixtures f
 join public.team_match_stats hs on hs.fixture_id = f.id and hs.team_id = f.home_team_id
 join public.team_match_stats aw on aw.fixture_id = f.id and aw.team_id = f.away_team_id
 where f.status = 'finished';
 
--- Keep the main Best Bets page strictly on the calibrated core model.
-create or replace view public.scanner_best_bets
+-- Existing Value Engine setup created this view with an older column layout.
+-- Drop/recreate avoids PostgreSQL CREATE OR REPLACE column-order restrictions.
+drop view if exists public.scanner_best_bets;
+
+create view public.scanner_best_bets
 with (security_invoker = true)
 as
 select
@@ -141,11 +142,7 @@ select
   p.grade,
   p.data_quality as "dataQuality",
   p.evidence,
-  case when r.id is null then null else jsonb_build_object(
-    'name', r.name,
-    'cardsPerMatch', rp.yellow_cards_per_match,
-    'foulsPerMatch', rp.fouls_per_match
-  ) end as referee,
+  case when r.id is null then null else jsonb_build_object('name',r.name,'cardsPerMatch',rp.yellow_cards_per_match,'foulsPerMatch',rp.fouls_per_match) end as referee,
   case when p.fair_probability is null then null else round((p.fair_probability * 100)::numeric, 1) end as "fairProbability",
   case when p.fair_probability is null or p.fair_probability <= 0 then null else round((1 / p.fair_probability)::numeric, 2) end as "fairOdds",
   bo.bookmaker as "bestBookmaker",
@@ -178,8 +175,7 @@ left join lateral (
 left join lateral (
   select os.bookmaker, os.decimal_odds, os.captured_at
   from public.odds_snapshots os
-  where os.prediction_id = p.id
-    and os.captured_at >= now() - interval '8 hours'
+  where os.prediction_id = p.id and os.captured_at >= now() - interval '8 hours'
   order by os.decimal_odds desc, os.captured_at desc
   limit 1
 ) bo on true
@@ -209,11 +205,7 @@ select
   p.evidence,
   fs.selection_key as "selectionKey",
   fs.features,
-  case when r.id is null then null else jsonb_build_object(
-    'name', r.name,
-    'cardsPerMatch', rp.yellow_cards_per_match,
-    'matchesSample', rp.matches_sample
-  ) end as referee,
+  case when r.id is null then null else jsonb_build_object('name',r.name,'cardsPerMatch',rp.yellow_cards_per_match,'matchesSample',rp.matches_sample) end as referee,
   coalesce(mmc.lineups_confirmed,false) as "lineupsConfirmed",
   coalesce(mmc.referee_confirmed,false) as "refereeConfirmed"
 from public.predictions p
@@ -302,9 +294,7 @@ left join lateral (
     select pms.*
     from public.player_match_stats pms
     join public.fixtures pf on pf.id = pms.fixture_id
-    where pms.player_id = p.id
-      and pf.kickoff < current_fixture.kickoff
-      and pf.status = 'finished'
+    where pms.player_id = p.id and pf.kickoff < current_fixture.kickoff and pf.status = 'finished'
     order by pf.kickoff desc
     limit 10
   ) x
@@ -335,23 +325,19 @@ join public.leagues l on l.id = f.league_id
 join public.countries c on c.id = l.country_id
 join public.teams ht on ht.id = f.home_team_id
 join public.teams at on at.id = f.away_team_id
-where f.status in ('scheduled','live')
-  and f.kickoff >= now() - interval '3 hours'
+where f.status in ('scheduled','live') and f.kickoff >= now() - interval '3 hours'
 order by f.kickoff, cr.data_quality desc;
 
--- Settlement for the new research markets. These are tracked independently from v0.
 create or replace function public.settle_expanded_predictions()
 returns integer
 language plpgsql
 security definer
 set search_path = public
 as $$
-declare
-  affected integer := 0;
+declare affected integer := 0;
 begin
   insert into public.prediction_results (prediction_id, outcome, settled_at)
-  select
-    p.id,
+  select p.id,
     case
       when fs.selection_key = 'btts_yes' then case when coalesce(f.home_goals,0) > 0 and coalesce(f.away_goals,0) > 0 then 'win' else 'loss' end
       when fs.selection_key = 'home_goals_0_5' then case when coalesce(f.home_goals,0) >= 1 then 'win' else 'loss' end
@@ -370,38 +356,24 @@ begin
   left join public.team_match_stats hs on hs.fixture_id = f.id and hs.team_id = f.home_team_id
   left join public.team_match_stats aw on aw.fixture_id = f.id and aw.team_id = f.away_team_id
   left join public.prediction_results existing on existing.prediction_id = p.id
-  where existing.prediction_id is null
-    and p.model_version = 'v1-expanded-research';
-
+  where existing.prediction_id is null and p.model_version = 'v1-expanded-research';
   get diagnostics affected = row_count;
   return affected;
 end;
 $$;
 
--- RLS: browser reads are allowed; all writes continue through Netlify service-role functions.
 alter table public.players enable row level security;
 alter table public.player_match_stats enable row level security;
 alter table public.fixture_lineups enable row level security;
 alter table public.manual_match_context enable row level security;
 alter table public.combo_recommendations enable row level security;
 
-do $$ begin
-  create policy "public read players" on public.players for select to anon, authenticated using (true);
-exception when duplicate_object then null; end $$;
-do $$ begin
-  create policy "public read player stats" on public.player_match_stats for select to anon, authenticated using (true);
-exception when duplicate_object then null; end $$;
-do $$ begin
-  create policy "public read fixture lineups" on public.fixture_lineups for select to anon, authenticated using (true);
-exception when duplicate_object then null; end $$;
-do $$ begin
-  create policy "public read manual context" on public.manual_match_context for select to anon, authenticated using (true);
-exception when duplicate_object then null; end $$;
-do $$ begin
-  create policy "public read combos" on public.combo_recommendations for select to anon, authenticated using (true);
-exception when duplicate_object then null; end $$;
+do $$ begin create policy "public read players" on public.players for select to anon, authenticated using (true); exception when duplicate_object then null; end $$;
+do $$ begin create policy "public read player stats" on public.player_match_stats for select to anon, authenticated using (true); exception when duplicate_object then null; end $$;
+do $$ begin create policy "public read fixture lineups" on public.fixture_lineups for select to anon, authenticated using (true); exception when duplicate_object then null; end $$;
+do $$ begin create policy "public read manual context" on public.manual_match_context for select to anon, authenticated using (true); exception when duplicate_object then null; end $$;
+do $$ begin create policy "public read combos" on public.combo_recommendations for select to anon, authenticated using (true); exception when duplicate_object then null; end $$;
 
--- Existing predictions RLS only exposes publish_status='published', which is intentional.
 grant select on public.fixture_match_flat to anon, authenticated;
 grant select on public.scanner_best_bets to anon, authenticated;
 grant select on public.scanner_expanded_markets to anon, authenticated;
