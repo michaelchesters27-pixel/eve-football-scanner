@@ -3,354 +3,358 @@ import { createClient } from '@supabase/supabase-js'
 import {
   Activity,
   BarChart3,
+  CheckCircle2,
   CircleDollarSign,
-  CloudRain,
   Database,
   Flag,
   Goal,
+  Layers3,
+  RefreshCw,
   ShieldCheck,
   Sparkles,
   Trophy,
   UserRoundCheck,
+  Users,
 } from 'lucide-react'
 
-type Market = 'cards' | 'corners' | 'goals'
+type CoreMarket = 'cards' | 'corners' | 'goals'
 type Grade = 'A+' | 'A' | 'B' | 'C'
 type ValueStatus = 'strong' | 'value' | 'no_value' | 'waiting' | 'uncalibrated'
-
-type Evidence = {
-  key: string
-  label: string
-  display: string
-  score: number
-}
-
-type RefereeInfo = {
-  name: string
-  cardsPerMatch: number
-  foulsPerMatch?: number
-}
+type Page = 'best' | 'markets' | 'setup' | 'combos'
+type Evidence = { key: string; label: string; display: string; score: number }
 
 type Pick = {
   id: string
+  fixtureId?: string
   country: string
   league: string
   homeTeam: string
   awayTeam: string
   kickoff: string
-  market: Market
+  market: CoreMarket
   selection: string
   confidence: number
   grade: Grade
   dataQuality: number
   evidence: Evidence[]
-  referee?: RefereeInfo
-  researchNote?: string
+  referee?: { name: string; cardsPerMatch: number; foulsPerMatch?: number }
   fairProbability?: number | null
   fairOdds?: number | null
   bestBookmaker?: string | null
   bestOdds?: number | null
-  impliedProbability?: number | null
   edgePct?: number | null
   expectedValuePct?: number | null
   valueStatus?: ValueStatus | null
 }
 
-const weights: Record<Market, Record<string, number>> = {
-  cards: { recent: 0.24, venue: 0.20, opponent: 0.17, referee: 0.18, season: 0.11, h2h: 0.10 },
-  corners: { recent: 0.26, venue: 0.24, opponent: 0.20, season: 0.18, h2h: 0.12 },
-  goals: { recent: 0.24, venue: 0.22, opponent: 0.20, season: 0.18, h2h: 0.10, context: 0.06 },
+type ExpandedSignal = {
+  id: string
+  fixtureId: string
+  country: string
+  league: string
+  homeTeam: string
+  awayTeam: string
+  kickoff: string
+  market: string
+  selection: string
+  confidence: number
+  grade: Grade
+  dataQuality: number
+  evidence: Evidence[]
+  selectionKey: string
+  features: Record<string, unknown>
+  referee?: { name: string; cardsPerMatch?: number; matchesSample?: number } | null
+  lineupsConfirmed: boolean
+  refereeConfirmed: boolean
 }
 
-function gradeFor(score: number): Grade {
-  if (score >= 84) return 'A+'
-  if (score >= 78) return 'A'
-  if (score >= 70) return 'B'
-  return 'C'
+type SetupFixture = {
+  fixtureId: string
+  country: string
+  league: string
+  homeTeamId: string
+  homeTeam: string
+  awayTeamId: string
+  awayTeam: string
+  kickoff: string
+  referee?: string | null
+  refereeConfirmed: boolean
+  lineupsConfirmed: boolean
+  homeStarters: number
+  awayStarters: number
 }
 
-function scoreEvidence(market: Market, evidence: Evidence[], dataQuality = 94) {
-  const marketWeights = weights[market]
-  let weighted = 0
-  let weightUsed = 0
-  for (const item of evidence) {
-    const weight = marketWeights[item.key]
-    if (!weight) continue
-    weighted += item.score * weight
-    weightUsed += weight
-  }
-  const raw = weightUsed ? weighted / weightUsed : 0
-  const qualityAdjustment = 0.88 + (Math.min(100, dataQuality) / 100) * 0.12
-  return Math.round(raw * qualityAdjustment)
+type PlayerOutlook = {
+  fixtureId: string
+  teamId: string
+  teamName: string
+  playerId: string
+  name: string
+  position?: string | null
+  isStarting: boolean
+  matchesSample?: number | null
+  avgMinutes?: number | null
+  avgShots?: number | null
+  avgShotsOnTarget?: number | null
+  avgGoals?: number | null
+  avgYellowCards?: number | null
 }
 
-function demoPick(input: Omit<Pick, 'confidence' | 'grade'>): Pick {
-  const confidence = scoreEvidence(input.market, input.evidence, input.dataQuality)
-  return { ...input, confidence, grade: gradeFor(confidence) }
+type Combo = {
+  id: string
+  fixtureId: string
+  country: string
+  league: string
+  homeTeam: string
+  awayTeam: string
+  kickoff: string
+  sampleSize: number
+  singles: Array<{ selection: string; probability: number; eveScore?: number; hits?: number; sample?: number }>
+  doubles: Array<{ legs: string[]; probability: number; hits?: number; sample?: number }>
+  treble?: { legs: string[]; probability: number; hits?: number; sample?: number } | null
+  explanation?: string
+  dataQuality: number
 }
 
-const demoPicks: Pick[] = [
-  demoPick({
-    id: 'demo-1', country: 'England', league: 'Premier League', homeTeam: 'North London FC', awayTeam: 'West London FC', kickoff: '15:00',
-    market: 'cards', selection: 'Home Team — 2+ Yellow Cards', dataQuality: 97,
-    referee: { name: 'Demo Referee A', cardsPerMatch: 5.1, foulsPerMatch: 23.8 },
-    evidence: [
-      { key: 'recent', label: 'Recent 10', display: '8/10 cleared', score: 88 },
-      { key: 'venue', label: 'Home split', display: '82% cleared', score: 86 },
-      { key: 'opponent', label: 'Opponent draws cards', display: '2.3 per match', score: 84 },
-      { key: 'referee', label: 'Referee', display: '5.1 yellows/match', score: 91 },
-      { key: 'season', label: 'Season baseline', display: '2.18 cards/match', score: 80 },
-      { key: 'h2h', label: 'Recent H2H', display: '4/5 cleared', score: 78 },
-    ],
-    researchNote: 'Strong agreement across venue, opponent and referee factors.',
-  }),
-  demoPick({
-    id: 'demo-2', country: 'Italy', league: 'Serie A', homeTeam: 'Capital FC', awayTeam: 'Florence FC', kickoff: '17:30',
-    market: 'cards', selection: 'Away Team — 2+ Yellow Cards', dataQuality: 95,
-    referee: { name: 'Demo Referee B', cardsPerMatch: 5.4, foulsPerMatch: 25.1 },
-    evidence: [
-      { key: 'recent', label: 'Recent 10', display: '9/10 cleared', score: 92 },
-      { key: 'venue', label: 'Away split', display: '84% cleared', score: 88 },
-      { key: 'opponent', label: 'Opponent draws cards', display: '2.5 per match', score: 87 },
-      { key: 'referee', label: 'Referee', display: '5.4 yellows/match', score: 94 },
-      { key: 'season', label: 'Season baseline', display: '2.31 cards/match', score: 84 },
-      { key: 'h2h', label: 'Recent H2H', display: '4/5 cleared', score: 80 },
-    ],
-  }),
-  demoPick({
-    id: 'demo-3', country: 'Germany', league: 'Bundesliga', homeTeam: 'Rhine FC', awayTeam: 'Bavaria FC', kickoff: '14:30',
-    market: 'corners', selection: 'Away Team — 5+ Corners', dataQuality: 93,
-    evidence: [
-      { key: 'recent', label: 'Recent 10', display: '8/10 cleared', score: 86 },
-      { key: 'venue', label: 'Away split', display: '6.4 avg corners', score: 88 },
-      { key: 'opponent', label: 'Home team concedes', display: '5.8 avg corners', score: 84 },
-      { key: 'season', label: 'Season baseline', display: '6.1 avg corners', score: 83 },
-      { key: 'h2h', label: 'Recent H2H', display: '4/5 cleared', score: 76 },
-    ],
-  }),
-  demoPick({
-    id: 'demo-4', country: 'Netherlands', league: 'Eredivisie', homeTeam: 'Amsterdam FC', awayTeam: 'Rotterdam FC', kickoff: '19:00',
-    market: 'goals', selection: 'Match — Over 1.5 Goals', dataQuality: 96,
-    evidence: [
-      { key: 'recent', label: 'Recent 10', display: '9/10 cleared', score: 92 },
-      { key: 'venue', label: 'Home/away split', display: '3.1 combined avg', score: 90 },
-      { key: 'opponent', label: 'Scoring/conceding mix', display: 'Both profiles positive', score: 87 },
-      { key: 'season', label: 'Season baseline', display: '86% cleared', score: 88 },
-      { key: 'h2h', label: 'Recent H2H', display: '5/5 cleared', score: 84 },
-      { key: 'context', label: 'Match context', display: 'Normal league fixture', score: 75 },
-    ],
-  }),
-  demoPick({
-    id: 'demo-5', country: 'Spain', league: 'La Liga', homeTeam: 'Madrid FC', awayTeam: 'Seville FC', kickoff: '20:00',
-    market: 'corners', selection: 'Home Team — 5+ Corners', dataQuality: 91,
-    evidence: [
-      { key: 'recent', label: 'Recent 10', display: '7/10 cleared', score: 78 },
-      { key: 'venue', label: 'Home split', display: '6.3 avg corners', score: 86 },
-      { key: 'opponent', label: 'Away team concedes', display: '5.6 avg corners', score: 82 },
-      { key: 'season', label: 'Season baseline', display: '5.9 avg corners', score: 81 },
-      { key: 'h2h', label: 'Recent H2H', display: '3/5 cleared', score: 65 },
-    ],
-  }),
-  demoPick({
-    id: 'demo-6', country: 'France', league: 'Ligue 1', homeTeam: 'Paris FC', awayTeam: 'Lyon FC', kickoff: '20:00',
-    market: 'goals', selection: 'Second Half — Over 0.5 Goals', dataQuality: 92,
-    evidence: [
-      { key: 'recent', label: 'Recent 10', display: '8/10 cleared', score: 86 },
-      { key: 'venue', label: 'Home/away split', display: '81% cleared', score: 84 },
-      { key: 'opponent', label: 'Second-half profile', display: 'Strong', score: 82 },
-      { key: 'season', label: 'Season baseline', display: '79% cleared', score: 81 },
-      { key: 'h2h', label: 'Recent H2H', display: '4/5 cleared', score: 78 },
-      { key: 'context', label: 'Match context', display: 'No adverse flag', score: 74 },
-    ],
-  }),
-]
-
-const marketMeta = {
+const coreMeta = {
   cards: { label: 'Yellow Cards', icon: ShieldCheck },
   corners: { label: 'Corners', icon: Flag },
   goals: { label: 'Goals', icon: Goal },
 }
 
+const expandedLabels: Record<string, string> = {
+  btts: 'Both Teams To Score',
+  team_goals: 'Team Goals',
+  half_goals: 'Goals By Half',
+  match_cards: 'Overall Match Cards',
+  match_corners: 'Overall Match Corners',
+}
+
+function pageFromHash(): Page {
+  const value = window.location.hash.replace(/^#\/?/, '')
+  return ['best', 'markets', 'setup', 'combos'].includes(value) ? value as Page : 'best'
+}
+
 function App() {
-  const [activeMarket, setActiveMarket] = useState<'all' | Market>('all')
-  const [picks, setPicks] = useState<Pick[]>(demoPicks)
-  const [dataMode, setDataMode] = useState<'demo' | 'live' | 'error'>('demo')
-  const [dataMessage, setDataMessage] = useState('Waiting for the dedicated free Supabase project')
+  const [page, setPage] = useState<Page>(pageFromHash)
+  const url = import.meta.env.VITE_SUPABASE_URL as string | undefined
+  const key = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string | undefined
+  const supabase = useMemo(() => url && key ? createClient(url, key) : null, [url, key])
 
   useEffect(() => {
-    const url = import.meta.env.VITE_SUPABASE_URL as string | undefined
-    const key = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string | undefined
-    if (!url || !key) return
-
-    const supabase = createClient(url, key)
-    supabase
-      .from('scanner_best_bets')
-      .select('*')
-      .order('confidence', { ascending: false })
-      .limit(25)
-      .then(({ data, error }) => {
-        if (error) {
-          setDataMode('error')
-          setDataMessage(`Supabase connected, but scanner view is not ready: ${error.message}`)
-          return
-        }
-        if (!data?.length) {
-          setPicks([])
-          setDataMode('error')
-          setDataMessage('Supabase connected; no qualified scanner selections yet')
-          return
-        }
-        setPicks(data as Pick[])
-        setDataMode('live')
-        setDataMessage('Live data from the dedicated EVE Football Supabase project')
-      })
+    const onHash = () => setPage(pageFromHash())
+    window.addEventListener('hashchange', onHash)
+    return () => window.removeEventListener('hashchange', onHash)
   }, [])
 
-  const filtered = useMemo(
-    () => picks.filter((pick) => activeMarket === 'all' || pick.market === activeMarket).sort((a, b) => b.confidence - a.confidence),
-    [activeMarket, picks],
-  )
-
-  const topScore = picks.length ? Math.max(...picks.map((pick) => pick.confidence)) : 0
-  const averageQuality = picks.length ? Math.round(picks.reduce((sum, pick) => sum + pick.dataQuality, 0) / picks.length) : 0
-  const valueCount = picks.filter((pick) => pick.valueStatus === 'value' || pick.valueStatus === 'strong').length
+  const go = (next: Page) => {
+    window.location.hash = `/${next}`
+    setPage(next)
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
 
   return (
     <div className="app-shell">
       <header className="topbar">
         <div className="brand-row">
           <div className="brand-mark"><Activity size={22} /></div>
-          <div>
-            <div className="eyebrow">EVE ANALYTICS</div>
-            <h1>Football Scanner</h1>
-          </div>
+          <div><div className="eyebrow">EVE ANALYTICS</div><h1>Football Scanner</h1></div>
         </div>
-        <div className={`mode-pill ${dataMode}`}>
-          <span className="pulse-dot" />
-          {dataMode === 'live' ? 'LIVE DATA' : dataMode === 'error' ? 'CONNECTION CHECK' : 'RESEARCH / DEMO'}
+        <div className="header-right">
+          <nav className="page-nav">
+            <button className={page === 'best' ? 'active' : ''} onClick={() => go('best')}><Trophy size={15}/>Best Bets</button>
+            <button className={page === 'markets' ? 'active' : ''} onClick={() => go('markets')}><BarChart3 size={15}/>Market Lab</button>
+            <button className={page === 'setup' ? 'active' : ''} onClick={() => go('setup')}><Users size={15}/>Match Setup</button>
+            <button className={page === 'combos' ? 'active' : ''} onClick={() => go('combos')}><Layers3 size={15}/>Combo Lab</button>
+          </nav>
+          <div className={`mode-pill ${supabase ? 'live' : 'error'}`}><span className="pulse-dot" />{supabase ? 'LIVE DATA' : 'NOT CONNECTED'}</div>
         </div>
       </header>
 
       <main>
-        <section className="hero">
-          <div>
-            <div className="eyebrow">STATISTICAL MARKET INTELLIGENCE</div>
-            <h2>Find the strongest evidence.<br /><span>Ignore the noise.</span></h2>
-            <p>Cards, corners and goals ranked from home/away form, recent performance, opponent tendencies, H2H and referee data.</p>
-          </div>
-          <div className="hero-status">
-            <Database size={19} />
-            <div><strong>Data status</strong><span>{dataMessage}</span></div>
-          </div>
-        </section>
-
-        <section className="kpis">
-          <Kpi icon={Trophy} label="Qualified candidates" value={String(picks.length)} detail="Passed calibrated filters" />
-          <Kpi icon={Sparkles} label="Top EVE score" value={`${topScore}%`} detail="Statistical score" />
-          <Kpi icon={Database} label="Data quality" value={`${averageQuality}%`} detail="Coverage score" />
-          <Kpi icon={CircleDollarSign} label="Value bets now" value={String(valueCount)} detail="VALUE / STRONG VALUE only" />
-        </section>
-
-        {dataMode === 'live' && (
-          <section className="qualification-panel">
-            <div className="qualification-count"><Trophy size={20} /><strong>{picks.length} QUALIFIED FROM THE FULL SCAN</strong></div>
-            <p>
-              EVE scans every supported upcoming fixture across Yellow Cards, Corners and Goals. Only selections that pass the market-specific calibrated statistical filters appear below. These are the strongest current candidates — <strong>not automatically {picks.length} bets.</strong>
-            </p>
-            <div className="qualification-rule"><CircleDollarSign size={17} /><span><strong>Final betting rule:</strong> only VALUE or STRONG VALUE should be considered. NO VALUE = skip. WAITING PRICE = no decision yet.</span></div>
-          </section>
-        )}
-
-        <section className="scanner-section">
-          <div className="section-head">
-            <div>
-              <div className="eyebrow">CURRENT QUALIFIERS</div>
-              <h3>Strongest candidates from the full scan</h3>
-            </div>
-            <div className="tabs">
-              <button className={activeMarket === 'all' ? 'active' : ''} onClick={() => setActiveMarket('all')}>All</button>
-              {(Object.keys(marketMeta) as Market[]).map((market) => {
-                const Icon = marketMeta[market].icon
-                return <button key={market} className={activeMarket === market ? 'active' : ''} onClick={() => setActiveMarket(market)}><Icon size={15} />{marketMeta[market].label}</button>
-              })}
-            </div>
-          </div>
-
-          <div className="pick-grid">
-            {filtered.map((pick, index) => <PickCard key={pick.id} pick={pick} rank={index + 1} />)}
-          </div>
-        </section>
-
-        <section className="engine-grid">
-          <Engine icon={ShieldCheck} title="Card Engine" text="Venue card rate + opponent cards drawn + recent form + H2H + referee strictness." />
-          <Engine icon={Flag} title="Corner Engine" text="Corners won/conceded + venue splits + recent frequency + opponent profile + H2H." />
-          <Engine icon={Goal} title="Goal Engine" text="Scoring/conceding rates + half splits + home/away + recent form + H2H + context." />
-          <Engine icon={UserRoundCheck} title="Referee Engine" text="Yellow-card rate, fouls, home/away distribution, recent appointments and league baseline." />
-          <Engine icon={CloudRain} title="Context Engine" text="Weather and match context remain research factors only where data supports them." />
-          <Engine icon={CircleDollarSign} title="Value Engine" text="Compares EVE's conservative fair probability with current bookmaker price. NO VALUE means skip the bet." />
-        </section>
+        {page === 'best' && <BestBetsPage supabase={supabase} />}
+        {page === 'markets' && <MarketLabPage supabase={supabase} />}
+        {page === 'setup' && <MatchSetupPage supabase={supabase} />}
+        {page === 'combos' && <ComboLabPage supabase={supabase} />}
       </main>
-
-      <footer>EVE Football Scanner · Live statistical shortlist · Value filtered</footer>
+      <footer>EVE Football Scanner · Rolling historical evidence · Home/Away aware · Value filtered</footer>
     </div>
   )
 }
 
-function Kpi({ icon: Icon, label, value, detail }: { icon: typeof Activity; label: string; value: string; detail: string }) {
-  return <div className="kpi-card"><div className="kpi-icon"><Icon size={18} /></div><div><span>{label}</span><strong>{value}</strong><small>{detail}</small></div></div>
+function BestBetsPage({ supabase }: { supabase: any }) {
+  const [activeMarket, setActiveMarket] = useState<'all' | CoreMarket>('all')
+  const [picks, setPicks] = useState<Pick[]>([])
+  const [message, setMessage] = useState('Loading the calibrated shortlist…')
+
+  useEffect(() => {
+    if (!supabase) { setMessage('Supabase is not connected'); return }
+    supabase.from('scanner_best_bets').select('*').order('confidence', { ascending: false }).limit(50).then(({ data, error }: any) => {
+      if (error) { setMessage(`Scanner view error: ${error.message}`); return }
+      setPicks((data ?? []) as Pick[])
+      setMessage(data?.length ? 'Live calibrated candidates from the full scan' : 'No candidates currently pass the calibrated filters')
+    })
+  }, [supabase])
+
+  const filtered = useMemo(() => picks.filter((p) => activeMarket === 'all' || p.market === activeMarket).sort((a,b) => b.confidence-a.confidence), [activeMarket,picks])
+  const topScore = picks.length ? Math.max(...picks.map((p) => p.confidence)) : 0
+  const averageQuality = picks.length ? Math.round(picks.reduce((s,p) => s+p.dataQuality,0)/picks.length) : 0
+  const valueCount = picks.filter((p) => p.valueStatus === 'value' || p.valueStatus === 'strong').length
+
+  return <>
+    <section className="hero compact-hero">
+      <div><div className="eyebrow">CALIBRATED LIVE SHORTLIST</div><h2>Strongest candidates.<br/><span>Then check the price.</span></h2><p>EVE continuously rolls completed matches into the next analysis, with home performance separated from away performance.</p></div>
+      <div className="hero-status"><Database size={19}/><div><strong>Data status</strong><span>{message}</span></div></div>
+    </section>
+
+    <section className="kpis">
+      <Kpi icon={Trophy} label="Qualified candidates" value={String(picks.length)} detail="Survived calibrated filters" />
+      <Kpi icon={Sparkles} label="Top EVE score" value={`${topScore}%`} detail="Statistical score" />
+      <Kpi icon={Database} label="Data quality" value={`${averageQuality}%`} detail="Coverage score" />
+      <Kpi icon={CircleDollarSign} label="Value bets now" value={String(valueCount)} detail="VALUE / STRONG only" />
+    </section>
+
+    <section className="qualification-panel">
+      <div className="qualification-count"><Trophy size={20}/><strong>{picks.length} QUALIFIED FROM THE FULL SCAN</strong></div>
+      <p>EVE analyses all supported upcoming fixtures across team cards, team corners and goals. The {picks.length} shown here are the selections that survived the market-specific calibrated filters. <strong>They are the strongest statistical candidates — not automatically {picks.length} bets.</strong></p>
+      <div className="qualification-rule"><CircleDollarSign size={17}/><span><strong>Final betting rule:</strong> VALUE or STRONG VALUE = candidate. NO VALUE = skip. WAITING PRICE = no decision yet.</span></div>
+    </section>
+
+    <section className="scanner-section">
+      <div className="section-head"><div><div className="eyebrow">CURRENT QUALIFIERS</div><h3>Best Bets shortlist</h3></div><div className="tabs"><button className={activeMarket==='all'?'active':''} onClick={()=>setActiveMarket('all')}>All</button>{(Object.keys(coreMeta) as CoreMarket[]).map((m)=>{const Icon=coreMeta[m].icon;return <button key={m} className={activeMarket===m?'active':''} onClick={()=>setActiveMarket(m)}><Icon size={15}/>{coreMeta[m].label}</button>})}</div></div>
+      {filtered.length ? <div className="pick-grid">{filtered.map((pick,i)=><PickCard key={pick.id} pick={pick} rank={i+1}/>)}</div> : <Empty text="Nothing currently passes the calibrated shortlist."/>}
+    </section>
+  </>
 }
 
-function Engine({ icon: Icon, title, text }: { icon: typeof Activity; title: string; text: string }) {
-  return <article className="engine-card"><Icon size={20} /><div><h4>{title}</h4><p>{text}</p></div></article>
+function MarketLabPage({ supabase }: { supabase: any }) {
+  const [signals,setSignals]=useState<ExpandedSignal[]>([])
+  const [filter,setFilter]=useState('all')
+  const [message,setMessage]=useState('Loading expanded markets…')
+  useEffect(()=>{
+    if(!supabase){setMessage('Supabase is not connected');return}
+    supabase.from('scanner_expanded_markets').select('*').order('confidence',{ascending:false}).limit(100).then(({data,error}:any)=>{
+      if(error){setMessage(`Run SETUP_EXPANSION_V1.sql in Supabase first: ${error.message}`);return}
+      setSignals((data??[]) as ExpandedSignal[]);setMessage(`${data?.length??0} expanded research signals`)
+    })
+  },[supabase])
+  const filtered=signals.filter((s)=>filter==='all'||s.market===filter)
+  const marketNames=[...new Set(signals.map((s)=>s.market))]
+  return <>
+    <PageIntro eyebrow="EXPANDED MARKET LAB" title="More markets. Same evidence discipline." text="BTTS, goals per team, goals by half, overall match cards and overall match corners. Team cards and team corners remain in the calibrated core scanner." status={message}/>
+    <section className="info-panel"><CheckCircle2 size={18}/><div><strong>Home/Away differentiation is built in.</strong><span>If a team is at home, EVE weights its home-only history against the opponent's away-only history. Recent 10, season form, H2H, referee and confirmed starting XI context are layered around that venue split.</span></div></section>
+    <section className="research-panel"><strong>Research markets</strong><span>These new markets are being recorded and settled automatically, but they stay separate from Best Bets until their own walk-forward calibration proves the thresholds.</span></section>
+    <div className="tabs wide-tabs"><button className={filter==='all'?'active':''} onClick={()=>setFilter('all')}>All</button>{marketNames.map((m)=><button key={m} className={filter===m?'active':''} onClick={()=>setFilter(m)}>{expandedLabels[m]??m}</button>)}</div>
+    {filtered.length ? <div className="pick-grid expanded-grid">{filtered.map((s)=><ExpandedCard key={s.id} signal={s}/>)}</div> : <Empty text="No expanded signals yet. They will populate after the expansion SQL is run and the next analysis executes."/>}
+  </>
 }
 
-function valueLabel(status?: ValueStatus | null) {
-  if (status === 'strong') return 'STRONG VALUE'
-  if (status === 'value') return 'VALUE'
-  if (status === 'no_value') return 'NO VALUE — SKIP'
-  if (status === 'waiting') return 'WAITING PRICE'
-  return 'WAITING CALIBRATION'
-}
+function MatchSetupPage({ supabase }: { supabase:any }) {
+  const [fixtures,setFixtures]=useState<SetupFixture[]>([])
+  const [selectedId,setSelectedId]=useState('')
+  const [referee,setReferee]=useState('')
+  const [homeText,setHomeText]=useState('')
+  const [awayText,setAwayText]=useState('')
+  const [players,setPlayers]=useState<PlayerOutlook[]>([])
+  const [status,setStatus]=useState('Select a fixture, enter the referee and confirmed starting XIs, then press Confirm & Reanalyse.')
+  const [busy,setBusy]=useState(false)
 
-function PickCard({ pick, rank }: { pick: Pick; rank: number }) {
-  const Icon = marketMeta[pick.market].icon
-  return (
-    <article className="pick-card">
-      <div className="pick-top">
-        <div className="rank">#{rank}</div>
-        <div className={`grade grade-${pick.grade.replace('+', 'plus').toLowerCase()}`}>{pick.grade}</div>
-      </div>
-      <div className="league-line">{pick.country} · {pick.league} · {pick.kickoff}</div>
-      <h4>{pick.homeTeam} <span>vs</span> {pick.awayTeam}</h4>
-      <div className="selection"><Icon size={17} /><span>{pick.selection}</span></div>
+  const loadFixtures=()=>{
+    if(!supabase)return
+    supabase.from('fixture_setup_board').select('*').order('kickoff',{ascending:true}).limit(120).then(({data,error}:any)=>{
+      if(error){setStatus(`Run SETUP_EXPANSION_V1.sql in Supabase first: ${error.message}`);return}
+      const rows=(data??[]) as SetupFixture[];setFixtures(rows);if(!selectedId&&rows[0])setSelectedId(rows[0].fixtureId)
+    })
+  }
+  useEffect(loadFixtures,[supabase])
+  const selected=fixtures.find((f)=>f.fixtureId===selectedId)
 
-      {pick.valueStatus && (
-        <div className={`value-strip value-${pick.valueStatus}`}>
-          <div><CircleDollarSign size={16} /><strong>{valueLabel(pick.valueStatus)}</strong></div>
-          <span>{pick.bestOdds ? `${pick.bestBookmaker ?? 'Best price'} ${Number(pick.bestOdds).toFixed(2)}` : 'No compatible price available yet'}</span>
+  useEffect(()=>{
+    if(!supabase||!selectedId){setPlayers([]);return}
+    const current=fixtures.find((f)=>f.fixtureId===selectedId)
+    setReferee(current?.referee??'')
+    supabase.from('fixture_player_outlook').select('*').eq('fixtureId',selectedId).order('teamName').order('name').then(({data}:any)=>{
+      const rows=(data??[]) as PlayerOutlook[];setPlayers(rows)
+      if(current){
+        const home=rows.filter((p)=>p.teamId===current.homeTeamId).map((p)=>p.name)
+        const away=rows.filter((p)=>p.teamId===current.awayTeamId).map((p)=>p.name)
+        if(home.length)setHomeText(home.join('\n'));else setHomeText('')
+        if(away.length)setAwayText(away.join('\n'));else setAwayText('')
+      }
+    })
+  },[supabase,selectedId])
+
+  const split=(text:string)=>text.split('\n').map((x)=>x.trim()).filter(Boolean)
+  const confirm=async()=>{
+    if(!selected){return}
+    setBusy(true);setStatus('Saving match-day context and re-running EVE on this fixture…')
+    try{
+      const response=await fetch('/.netlify/functions/confirm-match-context',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({fixtureId:selected.fixtureId,refereeName:referee,homeLineup:split(homeText),awayLineup:split(awayText)})})
+      const result=await response.json()
+      if(!response.ok||!result.ok)throw new Error(result.error??'Confirmation failed')
+      setStatus(result.message)
+      loadFixtures()
+      const {data}=await supabase.from('fixture_player_outlook').select('*').eq('fixtureId',selected.fixtureId).order('teamName').order('name')
+      setPlayers((data??[]) as PlayerOutlook[])
+    }catch(error){setStatus(error instanceof Error?error.message:String(error))}finally{setBusy(false)}
+  }
+
+  const homeCount=split(homeText).length,awayCount=split(awayText).length
+  return <>
+    <PageIntro eyebrow="MATCH-DAY CONFIRMATION" title="Referee + Starting XI refinement" text="EVE already completes the normal pre-match analysis. When the referee and starting teams are confirmed, enter them here and EVE immediately re-runs the match with player history included." status={status}/>
+    <section className="setup-card">
+      <label>Fixture<select value={selectedId} onChange={(e)=>setSelectedId(e.target.value)}><option value="">Select fixture</option>{fixtures.map((f)=><option key={f.fixtureId} value={f.fixtureId}>{new Date(f.kickoff).toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})} · {f.homeTeam} v {f.awayTeam}</option>)}</select></label>
+      {selected&&<>
+        <div className="fixture-heading"><div><span>{selected.country} · {selected.league}</span><strong>{selected.homeTeam} vs {selected.awayTeam}</strong></div><div className="context-badges"><i className={selected.refereeConfirmed?'ok':''}>REF {selected.refereeConfirmed?'CONFIRMED':'WAITING'}</i><i className={selected.lineupsConfirmed?'ok':''}>XI {selected.lineupsConfirmed?'CONFIRMED':'WAITING'}</i></div></div>
+        <label>Confirmed referee<input value={referee} onChange={(e)=>setReferee(e.target.value)} placeholder="e.g. Michael Oliver"/></label>
+        <div className="lineup-grid">
+          <label>{selected.homeTeam} starting XI <span>{homeCount}/11</span><textarea value={homeText} onChange={(e)=>setHomeText(e.target.value)} placeholder="One player per line" rows={13}/></label>
+          <label>{selected.awayTeam} starting XI <span>{awayCount}/11</span><textarea value={awayText} onChange={(e)=>setAwayText(e.target.value)} placeholder="One player per line" rows={13}/></label>
         </div>
-      )}
+        <button className="primary-action" disabled={busy} onClick={confirm}>{busy?<RefreshCw className="spin" size={17}/>:<CheckCircle2 size={17}/>}Confirm & Reanalyse</button>
+      </>}
+    </section>
 
-      <div className="confidence-row"><span>EVE statistical score</span><strong>{pick.confidence}%</strong></div>
-      <div className="meter"><i style={{ width: `${pick.confidence}%` }} /></div>
-
-      {(pick.fairOdds != null || pick.bestOdds != null) && (
-        <div className="value-metrics">
-          <div><span>Fair odds</span><strong>{pick.fairOdds != null ? Number(pick.fairOdds).toFixed(2) : '—'}</strong></div>
-          <div><span>Best odds</span><strong>{pick.bestOdds != null ? Number(pick.bestOdds).toFixed(2) : '—'}</strong></div>
-          <div><span>Edge</span><strong>{pick.edgePct != null ? `${Number(pick.edgePct).toFixed(1)}%` : '—'}</strong></div>
-          <div><span>EV</span><strong>{pick.expectedValuePct != null ? `${Number(pick.expectedValuePct).toFixed(1)}%` : '—'}</strong></div>
-        </div>
-      )}
-
-      <div className="evidence-grid">
-        {pick.evidence.map((item) => <div className="evidence" key={`${pick.id}-${item.key}`}><span>{item.label}</span><strong>{item.display}</strong><small>{item.score}/100 factor</small></div>)}
-      </div>
-      {pick.referee && <div className="referee-line"><UserRoundCheck size={16} /><div><span>{pick.referee.name}</span><strong>{pick.referee.cardsPerMatch.toFixed(1)} cards/match{pick.referee.foulsPerMatch ? ` · ${pick.referee.foulsPerMatch.toFixed(1)} fouls` : ''}</strong></div></div>}
-      <div className="quality-line"><span>Data quality</span><strong>{pick.dataQuality}%</strong></div>
-      {pick.researchNote && <p className="research-note">{pick.researchNote}</p>}
-    </article>
-  )
+    {selected&&<section className="player-section"><div className="section-head"><div><div className="eyebrow">PLAYER HISTORY</div><h3>Starting XI form used by EVE</h3></div></div>{players.length?<div className="player-tables"><PlayerTable team={selected.homeTeam} rows={players.filter((p)=>p.teamId===selected.homeTeamId)}/><PlayerTable team={selected.awayTeam} rows={players.filter((p)=>p.teamId===selected.awayTeamId)}/></div>:<Empty text="No confirmed lineup/player history is available yet. Enter the starting XIs above; player history will grow automatically as current-season matches are completed."/>}</section>}
+  </>
 }
+
+function ComboLabPage({supabase}:{supabase:any}){
+  const [combos,setCombos]=useState<Combo[]>([])
+  const [message,setMessage]=useState('Loading same-game analysis…')
+  useEffect(()=>{
+    if(!supabase){setMessage('Supabase is not connected');return}
+    supabase.from('combo_board').select('*').order('kickoff',{ascending:true}).limit(60).then(({data,error}:any)=>{
+      if(error){setMessage(`Run SETUP_EXPANSION_V1.sql in Supabase first: ${error.message}`);return}
+      setCombos((data??[]) as Combo[]);setMessage(`${data?.length??0} matches with empirical combo analysis`)
+    })
+  },[supabase])
+  return <>
+    <PageIntro eyebrow="SAME-GAME COMBINATION ENGINE" title="Singles, doubles and trebles" text="EVE measures how often the legs actually occurred together in comparable historical home/away matches. It does not pretend the legs are independent by simply multiplying percentages." status={message}/>
+    <section className="info-panel"><Layers3 size={18}/><div><strong>How to read this page</strong><span>Each single has its own historical joint-sample rate. Every two-leg combination gets a separate measured percentage. If three usable legs exist, EVE also shows the all-three treble rate.</span></div></section>
+    {combos.length?<div className="combo-grid">{combos.map((c)=><ComboCard key={c.id} combo={c}/>)}</div>:<Empty text="No combo analysis yet. It runs automatically after expanded-market analysis and also re-runs immediately when you confirm a referee/starting XI."/>}
+  </>
+}
+
+function PageIntro({eyebrow,title,text,status}:{eyebrow:string;title:string;text:string;status:string}){
+  return <section className="hero compact-hero"><div><div className="eyebrow">{eyebrow}</div><h2>{title}</h2><p>{text}</p></div><div className="hero-status"><Database size={19}/><div><strong>Status</strong><span>{status}</span></div></div></section>
+}
+function Kpi({icon:Icon,label,value,detail}:{icon:typeof Activity;label:string;value:string;detail:string}){return <div className="kpi-card"><div className="kpi-icon"><Icon size={18}/></div><div><span>{label}</span><strong>{value}</strong><small>{detail}</small></div></div>}
+function Empty({text}:{text:string}){return <div className="empty-state"><Database size={21}/><span>{text}</span></div>}
+function valueLabel(status?:ValueStatus|null){if(status==='strong')return'STRONG VALUE';if(status==='value')return'VALUE';if(status==='no_value')return'NO VALUE — SKIP';if(status==='waiting')return'WAITING PRICE';return'WAITING CALIBRATION'}
+
+function PickCard({pick,rank}:{pick:Pick;rank:number}){
+  const Icon=coreMeta[pick.market].icon
+  return <article className="pick-card"><div className="pick-top"><div className="rank">#{rank}</div><div className={`grade grade-${pick.grade.replace('+','plus').toLowerCase()}`}>{pick.grade}</div></div><div className="league-line">{pick.country} · {pick.league} · {pick.kickoff}</div><h4>{pick.homeTeam} <span>vs</span> {pick.awayTeam}</h4><div className="selection"><Icon size={17}/><span>{pick.selection}</span></div>
+    {pick.valueStatus&&<div className={`value-strip value-${pick.valueStatus}`}><div><CircleDollarSign size={16}/><strong>{valueLabel(pick.valueStatus)}</strong></div><span>{pick.bestOdds?`${pick.bestBookmaker??'Best price'} ${Number(pick.bestOdds).toFixed(2)}`:'No compatible price available yet'}</span></div>}
+    <div className="confidence-row"><span>EVE statistical score</span><strong>{pick.confidence}%</strong></div><div className="meter"><i style={{width:`${pick.confidence}%`}}/></div>
+    {(pick.fairOdds!=null||pick.bestOdds!=null)&&<div className="value-metrics"><Metric label="Fair odds" value={pick.fairOdds!=null?Number(pick.fairOdds).toFixed(2):'—'}/><Metric label="Best odds" value={pick.bestOdds!=null?Number(pick.bestOdds).toFixed(2):'—'}/><Metric label="Edge" value={pick.edgePct!=null?`${Number(pick.edgePct).toFixed(1)}%`:'—'}/><Metric label="EV" value={pick.expectedValuePct!=null?`${Number(pick.expectedValuePct).toFixed(1)}%`:'—'}/></div>}
+    <EvidenceGrid evidence={pick.evidence??[]} id={pick.id}/>{pick.referee&&<div className="referee-line"><UserRoundCheck size={16}/><div><span>{pick.referee.name}</span><strong>{Number(pick.referee.cardsPerMatch??0).toFixed(1)} cards/match</strong></div></div>}<div className="quality-line"><span>Data quality</span><strong>{pick.dataQuality}%</strong></div></article>
+}
+function ExpandedCard({signal}:{signal:ExpandedSignal}){return <article className="pick-card expanded-card"><div className="pick-top"><div className="research-tag">RESEARCH</div><div className={`grade grade-${signal.grade.replace('+','plus').toLowerCase()}`}>{signal.grade}</div></div><div className="league-line">{signal.country} · {signal.league} · {signal.kickoff}</div><h4>{signal.homeTeam} <span>vs</span> {signal.awayTeam}</h4><div className="selection"><BarChart3 size={17}/><span>{signal.selection}</span></div><div className="context-badges inline-badges"><i className={signal.refereeConfirmed?'ok':''}>REF</i><i className={signal.lineupsConfirmed?'ok':''}>XI</i></div><div className="confidence-row"><span>EVE research score</span><strong>{signal.confidence}%</strong></div><div className="meter"><i style={{width:`${signal.confidence}%`}}/></div><EvidenceGrid evidence={signal.evidence??[]} id={signal.id}/><div className="quality-line"><span>Data quality</span><strong>{signal.dataQuality}%</strong></div></article>}
+function EvidenceGrid({evidence,id}:{evidence:Evidence[];id:string}){return <div className="evidence-grid">{evidence.map((e)=><div className="evidence" key={`${id}-${e.key}`}><span>{e.label}</span><strong>{e.display}</strong><small>{e.score}/100 factor</small></div>)}</div>}
+function Metric({label,value}:{label:string;value:string}){return <div><span>{label}</span><strong>{value}</strong></div>}
+function PlayerTable({team,rows}:{team:string;rows:PlayerOutlook[]}){return <div className="player-table-wrap"><h4>{team}</h4><div className="player-table"><div className="player-row player-head"><span>Player</span><span>Matches</span><span>Shots</span><span>SOT</span><span>Goals</span><span>Cards</span></div>{rows.map((p)=><div className="player-row" key={p.playerId}><span><strong>{p.name}</strong><small>{p.position??'—'}</small></span><span>{p.matchesSample??0}</span><span>{p.avgShots??'—'}</span><span>{p.avgShotsOnTarget??'—'}</span><span>{p.avgGoals??'—'}</span><span>{p.avgYellowCards??'—'}</span></div>)}</div></div>}
+function ComboCard({combo}:{combo:Combo}){return <article className="combo-card"><div className="league-line">{combo.country} · {combo.league} · {new Date(combo.kickoff).toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</div><h4>{combo.homeTeam} <span>vs</span> {combo.awayTeam}</h4><div className="combo-sample">Comparable home/away sample: <strong>{combo.sampleSize}</strong> · Data quality <strong>{combo.dataQuality}%</strong></div><h5>Single legs</h5>{combo.singles?.map((s,i)=><div className="prob-row" key={i}><span>{s.selection}</span><strong>{s.probability}%</strong></div>)}<h5>Two-leg combinations</h5>{combo.doubles?.map((d,i)=><div className="prob-row" key={i}><span>{d.legs.join(' + ')}</span><strong>{d.probability}%</strong></div>)}{combo.treble&&<><h5>All three</h5><div className="prob-row treble"><span>{combo.treble.legs.join(' + ')}</span><strong>{combo.treble.probability}%</strong></div></>}<p>{combo.explanation}</p></article>}
 
 export default App
