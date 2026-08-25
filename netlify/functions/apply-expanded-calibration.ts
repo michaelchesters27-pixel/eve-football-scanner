@@ -4,7 +4,13 @@ export const config = { schedule: '49 5 * * *' }
 
 type Market = 'btts' | 'team_goals' | 'half_goals' | 'match_cards' | 'match_corners'
 type Grade = 'A+' | 'A' | 'B' | 'C'
-type Prediction = { id: string; market: Market; confidence: number; data_quality: number }
+type Prediction = {
+  id: string
+  market: Market
+  confidence: number
+  data_quality: number
+  feature_snapshots?: { features?: any } | null
+}
 type Recommendation = { threshold: number; n: number; wins: number; hitRate: number; wilsonLow: number }
 
 const MODEL = 'v1-expanded-research'
@@ -59,14 +65,14 @@ export default async () => {
   const now = new Date().toISOString()
   const { data, error } = await supabase
     .from('predictions')
-    .select('id,market,confidence,data_quality,fixtures!inner(kickoff,status)')
+    .select('id,market,confidence,data_quality,feature_snapshots(features),fixtures!inner(kickoff,status)')
     .eq('model_version', MODEL)
     .in('fixtures.status', ['scheduled', 'live'])
     .gte('fixtures.kickoff', now)
   if (error) return new Response(JSON.stringify({ ok: false, error: error.message }), { status: 500, headers: { 'content-type': 'application/json' } })
 
   const rows = (data ?? []) as unknown as Prediction[]
-  const counts: Record<string, { evaluated: number; published: number; threshold: number; fairProbability: number }> = {}
+  const counts: Record<string, { evaluated: number; published: number; threshold: number; fairProbability: number; xiDowngrades:number; xiPromotionsBlocked:number }> = {}
   const groups = new Map<string, { ids: string[]; grade: Grade; publish_status: 'published' | 'suppressed'; fair_probability: number | null }>()
 
   for (const row of rows) {
@@ -74,11 +80,19 @@ export default async () => {
     if (!recommendation) continue
     const threshold = Number(recommendation.threshold)
     const fair = Math.max(0, Math.min(0.99, Number(recommendation.wilsonLow) / 100))
-    const publish = row.data_quality >= 70 && row.confidence >= threshold
+    const baselineRaw=Number(row.feature_snapshots?.features?.lineupImpact?.baselineConfidence)
+    const baselineConfidence=Number.isFinite(baselineRaw)?baselineRaw:row.confidence
+    const baselinePass=baselineConfidence>=threshold
+    const refinedPass=row.confidence>=threshold
+    // XI intelligence can veto/downgrade a calibrated candidate, but cannot create
+    // a new qualifier that the lineup-neutral walk-forward model did not already pass.
+    const publish = row.data_quality >= 70 && baselinePass && refinedPass
     const grade = gradeFor(row.confidence, threshold)
-    counts[row.market] ??= { evaluated: 0, published: 0, threshold, fairProbability: fair }
+    counts[row.market] ??= { evaluated: 0, published: 0, threshold, fairProbability: fair, xiDowngrades:0, xiPromotionsBlocked:0 }
     counts[row.market].evaluated += 1
     if (publish) counts[row.market].published += 1
+    if(baselinePass&&!refinedPass) counts[row.market].xiDowngrades+=1
+    if(!baselinePass&&refinedPass) counts[row.market].xiPromotionsBlocked+=1
 
     const publish_status = publish ? 'published' : 'suppressed'
     const fair_probability = publish ? fair : null
@@ -109,6 +123,7 @@ export default async () => {
     counts,
     totalEvaluated: rows.length,
     totalPublished,
-    note: 'Expanded markets are now hit-rate calibrated from 2025/26 walk-forward data. Fair probability uses the conservative 95% Wilson lower bound. They remain in Market Lab during 2026/27 out-of-sample validation and are not automatically promoted to Best Bets.',
+    lineupGuardrail:'Confirmed XI intelligence may downgrade/veto a calibrated candidate, but it cannot promote a candidate that failed the lineup-neutral walk-forward threshold.',
+    note: 'Expanded markets are hit-rate calibrated from 2025/26 walk-forward data. Fair probability uses the conservative 95% Wilson lower bound. They remain in Market Lab during 2026/27 out-of-sample validation and are not automatically promoted to Best Bets.',
   }), { headers: { 'content-type': 'application/json' } })
 }
