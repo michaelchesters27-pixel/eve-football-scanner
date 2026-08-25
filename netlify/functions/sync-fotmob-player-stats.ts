@@ -7,27 +7,24 @@ function slug(v:string){ return v.normalize('NFD').replace(/[\u0300-\u036f]/g,''
 function num(v:any){ const n=Number(typeof v==='object' && v ? (v.value ?? v.stat ?? v.total ?? NaN) : v); return Number.isFinite(n) ? n : null }
 function key(v:any){ return String(v ?? '').toLowerCase().replace(/[^a-z0-9]+/g,'') }
 
-function findStat(node:any, aliases:string[]): number | null {
-  if (node == null) return null
-  const wanted = new Set(aliases.map(key))
-  const visit = (value:any): number | null => {
-    if (value == null) return null
-    if (Array.isArray(value)) {
-      for (const item of value) { const got=visit(item); if(got!=null) return got }
+function findStat(node:any,aliases:string[]): number | null {
+  if(node==null) return null
+  const wanted=new Set(aliases.map(key))
+  const visit=(value:any):number|null=>{
+    if(value==null) return null
+    if(Array.isArray(value)){
+      for(const item of value){ const got=visit(item); if(got!=null) return got }
       return null
     }
-    if (typeof value !== 'object') return null
-    for (const [k,v] of Object.entries(value)) {
-      if (wanted.has(key(k))) { const n=num(v); if(n!=null) return n }
-      if (typeof v==='object' && v) {
-        const title = (v as any).title ?? (v as any).name ?? (v as any).key
-        if (title && wanted.has(key(title))) {
-          const n=num((v as any).value ?? (v as any).stat ?? (v as any).total)
-          if(n!=null) return n
-        }
+    if(typeof value!=='object') return null
+    for(const [k,v] of Object.entries(value)){
+      if(wanted.has(key(k))){ const n=num(v); if(n!=null) return n }
+      if(typeof v==='object'&&v){
+        const title=(v as any).title ?? (v as any).name ?? (v as any).key
+        if(title&&wanted.has(key(title))){ const n=num((v as any).value ?? (v as any).stat ?? (v as any).total); if(n!=null) return n }
       }
     }
-    for (const v of Object.values(value)) { if(typeof v==='object' && v){ const got=visit(v); if(got!=null) return got } }
+    for(const v of Object.values(value)){ if(typeof v==='object'&&v){ const got=visit(v); if(got!=null) return got } }
     return null
   }
   return visit(node)
@@ -38,9 +35,9 @@ async function fetchDetails(matchId:string){
   let last='FotMob matchDetails failed'
   for(const url of urls){
     try{
-      const r=await fetch(url,{headers:{accept:'application/json,text/plain,*/*','user-agent':'Mozilla/5.0 EVE-Football-Scanner/0.3'}})
+      const r=await fetch(url,{headers:{accept:'application/json,text/plain,*/*','user-agent':'Mozilla/5.0 EVE-Football-Scanner/0.5'}})
       if(!r.ok){ last=`${r.status} ${r.statusText}`; continue }
-      const body=await r.json(); if(body?.content || body?.general) return body
+      const body=await r.json(); if(body?.content||body?.general) return body
     }catch(e){ last=e instanceof Error?e.message:String(e) }
   }
   throw new Error(last)
@@ -61,26 +58,68 @@ function eventCount(events:any[],playerId:string,typeWords:string[]){
   }).length
 }
 
-export default async()=>{
-  const supabase=createClient(env('SUPABASE_URL'),env('SUPABASE_SERVICE_ROLE_KEY'),{auth:{persistSession:false,autoRefreshToken:false}})
-  const since=new Date(Date.now()-4*86400000).toISOString()
-  const {data:fixtures,error}=await supabase.from('fixtures')
-    .select('id,source_fixture_id,home_team_id,away_team_id,match_context,kickoff')
-    .eq('source','fotmob').eq('status','finished').gte('kickoff',since).order('kickoff',{ascending:false}).limit(80)
-  if(error) return new Response(JSON.stringify({ok:false,error:error.message}),{status:500,headers:{'content-type':'application/json'}})
+type FixtureRow={
+  id:string
+  source_fixture_id:string|null
+  home_team_id:string
+  away_team_id:string
+  match_context:any
+  kickoff:string
+}
 
-  let matches=0,playersWritten=0,statsWritten=0,lineupsWritten=0,refsWritten=0
+async function fixturesForRun(supabase:ReturnType<typeof createClient>,requestedFixtureId:string|null){
+  if(!requestedFixtureId){
+    const since=new Date(Date.now()-4*86400000).toISOString()
+    const {data,error}=await supabase.from('fixtures')
+      .select('id,source_fixture_id,home_team_id,away_team_id,match_context,kickoff')
+      .eq('source','fotmob').eq('status','finished').gte('kickoff',since).order('kickoff',{ascending:false}).limit(80)
+    if(error) throw error
+    return {fixtures:(data??[]) as FixtureRow[],mode:'daily' as const,target:null}
+  }
+
+  const {data:target,error:targetError}=await supabase.from('fixtures')
+    .select('id,kickoff,home_team_id,away_team_id')
+    .eq('id',requestedFixtureId).maybeSingle()
+  if(targetError||!target) throw new Error(targetError?.message ?? 'Target fixture not found')
+
+  const found=new Map<string,FixtureRow>()
+  for(const teamId of [target.home_team_id,target.away_team_id]){
+    const {data,error}=await supabase.from('fixtures')
+      .select('id,source_fixture_id,home_team_id,away_team_id,match_context,kickoff')
+      .eq('source','fotmob').eq('status','finished').lt('kickoff',target.kickoff)
+      .or(`home_team_id.eq.${teamId},away_team_id.eq.${teamId}`)
+      .order('kickoff',{ascending:false}).limit(10)
+    if(error) throw error
+    for(const row of data??[]) found.set(row.id,row as FixtureRow)
+  }
+  const fixtures=[...found.values()].sort((a,b)=>Date.parse(b.kickoff)-Date.parse(a.kickoff)).slice(0,20)
+  return {fixtures,mode:'targeted' as const,target}
+}
+
+export default async(request?:Request)=>{
+  const supabase=createClient(env('SUPABASE_URL'),env('SUPABASE_SERVICE_ROLE_KEY'),{auth:{persistSession:false,autoRefreshToken:false}})
+  const requestedFixtureId=request?new URL(request.url).searchParams.get('fixture_id'):null
+
+  let selection
+  try{ selection=await fixturesForRun(supabase,requestedFixtureId) }
+  catch(e){ return new Response(JSON.stringify({ok:false,error:e instanceof Error?e.message:String(e)}),{status:500,headers:{'content-type':'application/json'}}) }
+
+  let matches=0,playersWritten=0,statsWritten=0,lineupsWritten=0,refsWritten=0,skippedComplete=0
   const warnings:string[]=[]
 
-  for(const fixture of fixtures??[]){
+  for(const fixture of selection.fixtures){
     try{
+      const {count}=await supabase.from('player_match_stats').select('id',{count:'exact',head:true}).eq('fixture_id',fixture.id)
+      if(Number(count??0)>=18){ skippedComplete+=1; continue }
+      if(!fixture.source_fixture_id){ warnings.push(`${fixture.id}: missing FotMob source fixture id`); continue }
+
       const payload=await fetchDetails(String(fixture.source_fixture_id))
       const refereeRaw=payload?.content?.matchFacts?.infoBox?.Referee ?? payload?.content?.matchFacts?.infoBox?.referee ?? payload?.general?.referee
       const refereeName=typeof refereeRaw==='string'?refereeRaw:String(refereeRaw?.text ?? refereeRaw?.name ?? '').trim()
       if(refereeName){
         const sourceKey=`fotmob-ref:${slug(refereeName)}`
         const {data:ref,error:refError}=await supabase.from('referees').upsert({source_key:sourceKey,name:refereeName},{onConflict:'source_key'}).select('id').single()
-        if(!refError && ref?.id){ await supabase.from('fixtures').update({referee_id:ref.id,updated_at:new Date().toISOString()}).eq('id',fixture.id); refsWritten+=1 }
+        if(!refError&&ref?.id){ await supabase.from('fixtures').update({referee_id:ref.id,updated_at:new Date().toISOString()}).eq('id',fixture.id); refsWritten+=1 }
       }
 
       const lineups=payload?.content?.lineup?.lineups ?? payload?.content?.lineup2?.lineups ?? []
@@ -131,9 +170,24 @@ export default async()=>{
         }
       }
       matches+=1
-    }catch(e){ warnings.push(`${fixture.source_fixture_id}: ${e instanceof Error?e.message:String(e)}`) }
+    }catch(e){ warnings.push(`${fixture.source_fixture_id ?? fixture.id}: ${e instanceof Error?e.message:String(e)}`) }
     await new Promise((resolve)=>setTimeout(resolve,180))
   }
 
-  return new Response(JSON.stringify({ok:true,matches,playersWritten,statsWritten,lineupsWritten,refsWritten,warnings:warnings.slice(0,30),note:'FotMob matchDetails is an unofficial feed; EVE stores compact derived player stats only.'}),{headers:{'content-type':'application/json'}})
+  return new Response(JSON.stringify({
+    ok:true,
+    mode:selection.mode,
+    targetFixtureId:requestedFixtureId,
+    candidateMatches:selection.fixtures.length,
+    matches,
+    skippedComplete,
+    playersWritten,
+    statsWritten,
+    lineupsWritten,
+    refsWritten,
+    warnings:warnings.slice(0,30),
+    note:selection.mode==='targeted'
+      ? 'Loaded up to the previous 10 FotMob matches for each team so confirmed starters can be evaluated against compact prior player history.'
+      : 'Daily player sync. FotMob matchDetails is an unofficial feed; EVE stores compact derived player stats only.',
+  }),{headers:{'content-type':'application/json'}})
 }
