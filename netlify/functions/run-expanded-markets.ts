@@ -36,9 +36,13 @@ type Candidate = {
 
 type PlayerOutlook = {
   teamId: string
+  name?: string | null
+  position?: string | null
   matchesSample: number | null
+  avgMinutes: number | null
   avgShots: number | null
   avgShotsOnTarget: number | null
+  avgGoals: number | null
   avgYellowCards: number | null
 }
 
@@ -99,30 +103,88 @@ function sampleQuality(parts: Array<[number, number, number]>) {
   return Math.round(parts.reduce((sum, [actual, target, w]) => sum + clamp(actual / target, 0, 1) * w, 0) / sumWeight * 100)
 }
 function rate(value: number) { return `${Math.round(value)}% hit` }
+function round1(value:number){ return Math.round(value*10)/10 }
+function per90(value:number|null|undefined,minutes:number|null|undefined){
+  const v=Number(value??0),m=Number(minutes??0)
+  if(!Number.isFinite(v)||!Number.isFinite(m)||m<15) return 0
+  return v*90/m
+}
+function shrinkToNeutral(raw:number,reliability:number,maxDistance=16){
+  const capped=clamp(raw,50-maxDistance,50+maxDistance)
+  return 50+(capped-50)*clamp(reliability,0,100)/100
+}
 
-function lineupContext(players: PlayerOutlook[], homeTeamId: string, awayTeamId: string) {
-  const useful = players.filter((p) => Number(p.matchesSample ?? 0) > 0)
-  const home = useful.filter((p) => p.teamId === homeTeamId)
-  const away = useful.filter((p) => p.teamId === awayTeamId)
-  const homeSot = home.reduce((sum, p) => sum + Number(p.avgShotsOnTarget ?? 0), 0)
-  const awaySot = away.reduce((sum, p) => sum + Number(p.avgShotsOnTarget ?? 0), 0)
-  const homeShots = home.reduce((sum, p) => sum + Number(p.avgShots ?? 0), 0)
-  const awayShots = away.reduce((sum, p) => sum + Number(p.avgShots ?? 0), 0)
-  const avgCards = mean(useful.map((p) => p.avgYellowCards))
-  const confirmed = home.length >= 7 && away.length >= 7
+function lineupContext(players: PlayerOutlook[], homeTeamId: string, awayTeamId: string, explicitlyConfirmed:boolean) {
+  const allHome=players.filter((p)=>p.teamId===homeTeamId)
+  const allAway=players.filter((p)=>p.teamId===awayTeamId)
+  const withHistory=players.filter((p)=>Number(p.matchesSample??0)>0)
+  const reliable=withHistory.filter((p)=>Number(p.matchesSample??0)>=3 && Number(p.avgMinutes??0)>=30)
+  const homeReliable=reliable.filter((p)=>p.teamId===homeTeamId)
+  const awayReliable=reliable.filter((p)=>p.teamId===awayTeamId)
+  const confirmed=explicitlyConfirmed && allHome.length>=11 && allAway.length>=11
+
+  const sampleDepth=mean(players.map((p)=>Math.min(Number(p.matchesSample??0),8)/8))*100
+  const coverage=(homeReliable.length+awayReliable.length)/22*100
+  const reliability=confirmed ? clamp(coverage*.7+sampleDepth*.3) : 0
+  const usable=confirmed && reliability>=25 && homeReliable.length>=4 && awayReliable.length>=4
+
+  function scaledTeam(rows:PlayerOutlook[],field:'avgShots'|'avgShotsOnTarget'|'avgGoals'|'avgYellowCards'){
+    if(!rows.length) return 0
+    const observed=rows.map((p)=>per90(p[field],p.avgMinutes)).filter(Number.isFinite)
+    return observed.length ? observed.reduce((a,b)=>a+b,0)/observed.length*11 : 0
+  }
+
+  const homeShots90=scaledTeam(homeReliable,'avgShots')
+  const awayShots90=scaledTeam(awayReliable,'avgShots')
+  const homeSot90=scaledTeam(homeReliable,'avgShotsOnTarget')
+  const awaySot90=scaledTeam(awayReliable,'avgShotsOnTarget')
+  const homeGoals90=scaledTeam(homeReliable,'avgGoals')
+  const awayGoals90=scaledTeam(awayReliable,'avgGoals')
+  const homeCards90=scaledTeam(homeReliable,'avgYellowCards')
+  const awayCards90=scaledTeam(awayReliable,'avgYellowCards')
+
+  const rawHomeGoal=50+(homeSot90-4.5)*4.0+(homeShots90-12)*0.8+(homeGoals90-1.35)*5
+  const rawAwayGoal=50+(awaySot90-4.0)*4.0+(awayShots90-11)*0.8+(awayGoals90-1.15)*5
+  const rawJointGoal=50+((homeSot90+awaySot90)-8.5)*2.1+((homeGoals90+awayGoals90)-2.5)*3
+  const rawCorner=50+((homeShots90+awayShots90)-23)*0.85+((homeSot90+awaySot90)-8.5)*0.65
+  const rawCards=50+((homeCards90+awayCards90)-4)*5.5
+
+  const factor=usable?reliability:0
+  const homeGoalScore=shrinkToNeutral(rawHomeGoal,factor)
+  const awayGoalScore=shrinkToNeutral(rawAwayGoal,factor)
+  const goalScore=shrinkToNeutral(rawJointGoal,factor)
+  const cornerScore=shrinkToNeutral(rawCorner,factor)
+  const cardScore=shrinkToNeutral(rawCards,factor)
+
+  const topAttackers=[...reliable].map((p)=>({
+    name:p.name??'Unknown',teamId:p.teamId,matches:Number(p.matchesSample??0),
+    sot90:round1(per90(p.avgShotsOnTarget,p.avgMinutes)),
+    goals90:round1(per90(p.avgGoals,p.avgMinutes)),
+  })).sort((a,b)=>(b.sot90+b.goals90*1.5)-(a.sot90+a.goals90*1.5)).slice(0,5)
+  const cardRisks=[...reliable].map((p)=>({
+    name:p.name??'Unknown',teamId:p.teamId,matches:Number(p.matchesSample??0),cards90:round1(per90(p.avgYellowCards,p.avgMinutes)),
+  })).sort((a,b)=>b.cards90-a.cards90).slice(0,5)
+
   return {
     confirmed,
-    samplePlayers: useful.length,
-    homeSot,
-    awaySot,
-    totalSot: homeSot + awaySot,
-    totalShots: homeShots + awayShots,
-    avgCards,
-    goalScore: confirmed ? clamp(38 + (homeSot + awaySot) * 5.5) : 50,
-    homeGoalScore: confirmed ? clamp(40 + homeSot * 9) : 50,
-    awayGoalScore: confirmed ? clamp(40 + awaySot * 9) : 50,
-    cornerScore: confirmed ? clamp(40 + (homeShots + awayShots) * 1.7) : 50,
-    cardScore: confirmed && avgCards > 0 ? clamp(45 + avgCards * 65) : 50,
+    usable,
+    startersEntered:{home:allHome.length,away:allAway.length},
+    historyPlayers:withHistory.length,
+    reliablePlayers:reliable.length,
+    homeReliablePlayers:homeReliable.length,
+    awayReliablePlayers:awayReliable.length,
+    historyCoveragePct:round1(coverage),
+    sampleDepthPct:round1(sampleDepth),
+    reliabilityPct:round1(reliability),
+    homeShots90:round1(homeShots90),awayShots90:round1(awayShots90),
+    homeSot90:round1(homeSot90),awaySot90:round1(awaySot90),
+    homeGoals90:round1(homeGoals90),awayGoals90:round1(awayGoals90),
+    homeCards90:round1(homeCards90),awayCards90:round1(awayCards90),
+    totalShots90:round1(homeShots90+awayShots90),totalSot90:round1(homeSot90+awaySot90),
+    goalScore:round1(goalScore),homeGoalScore:round1(homeGoalScore),awayGoalScore:round1(awayGoalScore),
+    cornerScore:round1(cornerScore),cardScore:round1(cardScore),
+    topAttackers,cardRisks,
+    calibrationNote:'Starting-XI influence is a small reliability-shrunk match-day refinement. It is not allowed to masquerade as a separately backtested player edge.',
   }
 }
 
@@ -155,14 +217,16 @@ function jointMatchCandidate(
   const refereeScore = referee ? clamp(40 + (refCards - 3) * 17) : 50
   const lineupScore = market === 'match_cards' ? lineup.cardScore : market === 'match_corners' ? lineup.cornerScore : lineup.goalScore
 
+  const lineupSample=lineup.usable?Math.round(lineup.reliabilityPct/100*14):0
   const quality = sampleQuality([
     [home10.length + away10.length, 20, 22],
     [homeVenue.length + awayVenue.length, 20, 30],
     [homeSeason.length + awaySeason.length, 50, 18],
     [h2h.length, 4, 8],
-    [lineup.confirmed ? lineup.samplePlayers : 0, 14, 10],
-    [market === 'match_cards' ? Number(referee?.matches_sample ?? 0) : 10, 10, market === 'match_cards' ? 12 : 12],
+    [lineupSample, 14, 10],
+    [market === 'match_cards' ? Number(referee?.matches_sample ?? 0) : 10, 10, 12],
   ])
+  const lineupDisplay=!lineup.confirmed?'Starting XI not confirmed':!lineup.usable?`XI confirmed · history thin (${lineup.reliablePlayers}/22 reliable)`:`XI confirmed · ${lineup.historyCoveragePct}% history coverage · ${lineup.totalSot90} SOT/90`
   const evidence: Evidence[] = [
     { key: 'recent', label: 'Recent 10 each', display: rate(recentRate), score: Math.round(recentRate) },
     { key: 'venue', label: 'Home vs away split', display: rate(venueRate), score: Math.round(venueRate) },
@@ -170,12 +234,18 @@ function jointMatchCandidate(
     { key: 'season', label: 'Season sample', display: rate(seasonRate), score: Math.round(seasonRate) },
     { key: 'h2h', label: 'H2H', display: h2h.length ? rate(h2hRate) : 'No usable sample', score: h2h.length ? Math.round(h2hRate) : 50 },
     ...(market === 'match_cards' ? [{ key: 'referee', label: 'Referee', display: referee ? `${refCards.toFixed(1)} cards/match` : 'Not confirmed', score: Math.round(refereeScore) }] : []),
-    { key: 'lineup', label: 'Starting XI', display: lineup.confirmed ? `${lineup.samplePlayers} starters with history` : 'Not confirmed / thin data', score: Math.round(lineupScore) },
+    { key: 'lineup', label: 'Starting XI intelligence', display: lineupDisplay, score: Math.round(lineupScore) },
   ]
   const confidence = score(market, evidence, quality)
+  const neutralEvidence=evidence.map((e)=>e.key==='lineup'?{...e,score:50}:e)
+  const baselineConfidence=score(market,neutralEvidence,quality)
   return {
     fixtureId, market, selectionKey, selection, confidence, grade: grade(confidence), dataQuality: quality, evidence,
-    features: { recentRate, venueRate, seasonRate, h2hRate, lineup, refereeCards: refCards, samples: { home: homeRows.length, away: awayRows.length, h2h: h2h.length } },
+    features: {
+      recentRate, venueRate, seasonRate, h2hRate, lineup, refereeCards: refCards,
+      lineupImpact:{baselineConfidence,refinedConfidence:confidence,delta:confidence-baselineConfidence},
+      samples: { home: homeRows.length, away: awayRows.length, h2h: h2h.length },
+    },
   }
 }
 
@@ -201,23 +271,31 @@ function teamGoalCandidate(
   const seasonRate = pct(season, ownTest)
   const h2hRate = pct(h2h, ownTest)
   const lineupScore = side === 'home' ? lineup.homeGoalScore : lineup.awayGoalScore
-  const quality = sampleQuality([[r10.length,10,20],[venue10.length,10,32],[opp10.length,10,22],[season.length,25,14],[h2h.length,4,5],[lineup.confirmed ? lineup.samplePlayers : 0,14,7]])
+  const lineupSample=lineup.usable?Math.round(lineup.reliabilityPct/100*14):0
+  const quality = sampleQuality([[r10.length,10,20],[venue10.length,10,32],[opp10.length,10,22],[season.length,25,14],[h2h.length,4,5],[lineupSample,14,7]])
+  const sideSot=side==='home'?lineup.homeSot90:lineup.awaySot90
+  const lineupDisplay=!lineup.confirmed?'Starting XI not confirmed':!lineup.usable?`XI confirmed · history thin (${lineup.reliablePlayers}/22 reliable)`:`XI confirmed · ${sideSot} SOT/90 · reliability ${lineup.reliabilityPct}%`
   const evidence: Evidence[] = [
     { key: 'recent', label: 'Recent 10', display: rate(recentRate), score: Math.round(recentRate) },
     { key: 'venue', label: side === 'home' ? 'Home-only form' : 'Away-only form', display: rate(venueRate), score: Math.round(venueRate) },
     { key: 'opponent', label: 'Opponent concedes', display: rate(opponentRate), score: Math.round(opponentRate) },
     { key: 'season', label: 'Season sample', display: rate(seasonRate), score: Math.round(seasonRate) },
     { key: 'h2h', label: 'H2H', display: h2h.length ? rate(h2hRate) : 'No usable sample', score: h2h.length ? Math.round(h2hRate) : 50 },
-    { key: 'lineup', label: 'Starting XI attack', display: lineup.confirmed ? `${(side === 'home' ? lineup.homeSot : lineup.awaySot).toFixed(1)} combined SOT avg` : 'Not confirmed', score: Math.round(lineupScore) },
+    { key: 'lineup', label: 'Starting XI attack', display: lineupDisplay, score: Math.round(lineupScore) },
   ]
   const confidence = score('team_goals', evidence, quality)
+  const neutralEvidence=evidence.map((e)=>e.key==='lineup'?{...e,score:50}:e)
+  const baselineConfidence=score('team_goals',neutralEvidence,quality)
   return {
     fixtureId,
     market: 'team_goals',
     selectionKey: `${side}_goals_${threshold === 1 ? '0_5' : '1_5'}`,
     selection: `${side === 'home' ? 'Home' : 'Away'} Team — ${threshold}+ Goal${threshold === 1 ? '' : 's'}`,
     confidence, grade: grade(confidence), dataQuality: quality, evidence,
-    features: { recentRate, venueRate, opponentRate, seasonRate, h2hRate, lineup, threshold, side },
+    features: {
+      recentRate, venueRate, opponentRate, seasonRate, h2hRate, lineup, threshold, side,
+      lineupImpact:{baselineConfidence,refinedConfidence:confidence,delta:confidence-baselineConfidence},
+    },
   }
 }
 
@@ -241,6 +319,7 @@ export default async (request?: Request) => {
   let generated = 0
   let qualified = 0
   const marketCounts: Record<string, number> = {}
+  const lineupSummaries:any[]=[]
 
   for (const fixture of fixtures ?? []) {
     const { data: history, error: historyError } = await supabase
@@ -262,10 +341,12 @@ export default async (request?: Request) => {
       referee = data
     }
 
+    const {data:manualContext}=await supabase.from('manual_match_context').select('lineups_confirmed').eq('fixture_id',fixture.id).maybeSingle()
     let playerRows: PlayerOutlook[] = []
-    const { data: outlook } = await supabase.from('fixture_player_outlook').select('teamId,matchesSample,avgShots,avgShotsOnTarget,avgYellowCards').eq('fixtureId', fixture.id)
+    const { data: outlook } = await supabase.from('fixture_player_outlook').select('teamId,name,position,matchesSample,avgMinutes,avgShots,avgShotsOnTarget,avgGoals,avgYellowCards').eq('fixtureId', fixture.id)
     if (outlook) playerRows = outlook as unknown as PlayerOutlook[]
-    const lineup = lineupContext(playerRows, fixture.home_team_id, fixture.away_team_id)
+    const lineup = lineupContext(playerRows, fixture.home_team_id, fixture.away_team_id, Boolean(manualContext?.lineups_confirmed))
+    if(lineup.confirmed) lineupSummaries.push({fixtureId:fixture.id,reliabilityPct:lineup.reliabilityPct,historyCoveragePct:lineup.historyCoveragePct,reliablePlayers:lineup.reliablePlayers,totalSot90:lineup.totalSot90})
 
     const candidates: Candidate[] = [
       jointMatchCandidate(fixture.id, 'btts', 'btts_yes', 'Both Teams To Score — Yes', homeRows, awayRows, fixture.away_team_id, btts, lineup, referee),
@@ -322,6 +403,7 @@ export default async (request?: Request) => {
     generated,
     researchQualified: qualified,
     marketCounts,
-    note: 'Expanded markets are research signals. They are separated from the calibrated Best Bets page until their own walk-forward calibration is complete.',
+    confirmedLineupIntelligence:lineupSummaries,
+    note: 'Expanded markets remain calibrated research signals. Confirmed starting XIs now add a small reliability-shrunk player-history refinement using shots, shots on target, goals, cards and minutes; thin player samples stay neutral rather than creating a false edge.',
   }), { headers: { 'content-type': 'application/json' } })
 }
