@@ -13,15 +13,25 @@ export default async () => {
     auth: { persistSession: false, autoRefreshToken: false },
   })
 
-  const { data, error } = await supabase.rpc('settle_v0_predictions')
-  if (error) {
-    return new Response(JSON.stringify({ ok: false, error: error.message }), {
+  const { data: core, error: coreError } = await supabase.rpc('settle_v0_predictions')
+  if (coreError) {
+    return new Response(JSON.stringify({ ok: false, error: coreError.message }), {
       status: 500,
       headers: { 'content-type': 'application/json' },
     })
   }
 
-  return new Response(JSON.stringify({ ok: true, settled: data ?? 0 }), {
+  // Expansion SQL adds this RPC. Until that one-shot SQL has been run we keep
+  // the proven v0 settlement working rather than failing the whole daily job.
+  const { data: expanded, error: expandedError } = await supabase.rpc('settle_expanded_predictions')
+
+  return new Response(JSON.stringify({
+    ok: true,
+    coreSettled: core ?? 0,
+    expandedSettled: expandedError ? null : (expanded ?? 0),
+    expansionReady: !expandedError,
+    expansionMessage: expandedError ? expandedError.message : null,
+  }), {
     headers: { 'content-type': 'application/json' },
   })
 }
