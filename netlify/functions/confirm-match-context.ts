@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js'
 import runExpandedMarkets from './run-expanded-markets'
+import applyExpandedCalibration from './apply-expanded-calibration'
 import runCombos from './run-combos'
 
 function env(name:string){ const v=process.env[name]; if(!v) throw new Error(`Missing required environment variable: ${name}`); return v }
@@ -74,13 +75,27 @@ export default async(request:Request)=>{
   },{onConflict:'fixture_id'})
   if(contextError) return json({ok:false,error:contextError.message},500)
 
-  // Re-run only this fixture immediately. No waiting for the morning schedule.
+  // Immediate pass using whatever player history is already available.
   const u=new URL(request.url)
   u.pathname='/.netlify/functions/run-expanded-now'
   u.search=`?fixture_id=${encodeURIComponent(fixtureId)}`
-  let expanded:any=null,combo:any=null
+  let expanded:any=null,calibration:any=null,combo:any=null
   try{ expanded=await (await runExpandedMarkets(new Request(u.toString()))).json() }catch(e){ expanded={ok:false,error:e instanceof Error?e.message:String(e)} }
+  try{ calibration=await (await applyExpandedCalibration()).json() }catch(e){ calibration={ok:false,error:e instanceof Error?e.message:String(e)} }
   try{ combo=await (await runCombos(new Request(u.toString()))).json() }catch(e){ combo={ok:false,error:e instanceof Error?e.message:String(e)} }
+
+  // If the full XI is confirmed, launch a long-running targeted history enrichment.
+  // Netlify background functions acknowledge quickly and continue after this request returns.
+  let enrichmentStarted=false
+  if(lineupsConfirmed){
+    try{
+      const bg=new URL(request.url)
+      bg.pathname='/.netlify/functions/enrich-lineup-history-background'
+      bg.search=`?fixture_id=${encodeURIComponent(fixtureId)}`
+      const response=await fetch(bg.toString(),{method:'GET'})
+      enrichmentStarted=response.ok || response.status===202
+    }catch{ enrichmentStarted=false }
+  }
 
   return json({
     ok:true,
@@ -90,7 +105,11 @@ export default async(request:Request)=>{
     homePlayers:homeNames.length,
     awayPlayers:awayNames.length,
     expanded,
+    calibration,
     combo,
-    message:lineupsConfirmed?'Referee/starting XI saved and EVE re-analysed the match.':'Saved. Enter exactly 11 players for each team to mark the starting XIs as confirmed.',
+    enrichmentStarted,
+    message:lineupsConfirmed
+      ? `Referee/starting XI saved. EVE re-analysed immediately${enrichmentStarted?' and is now loading up to 10 prior matches per team for deeper player history.':''}`
+      : 'Saved. Enter exactly 11 players for each team to mark the starting XIs as confirmed.',
   })
 }
