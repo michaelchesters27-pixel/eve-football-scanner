@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js'
-import syncPlayerHistory from './sync-fotmob-player-stats'
+import { loadFixturePlayerHistory } from './_shared/player-history'
 import runExpandedMarkets from './run-expanded-markets'
 import applyExpandedCalibration from './apply-expanded-calibration'
 import runCombos from './run-combos'
@@ -41,9 +41,7 @@ export default async(request:Request)=>{
   const u=new URL(request.url)
   u.search=`?fixture_id=${encodeURIComponent(fixtureId)}`
 
-  const syncResponse=await syncPlayerHistory(new Request(u.toString()))
-  if(!syncResponse.ok) throw new Error(`Player history sync failed: ${await syncResponse.text()}`)
-  const sync=await syncResponse.json()
+  const sync=await loadFixturePlayerHistory(supabase,fixtureId,10)
   const relink=await relinkManualPlayers(supabase,fixtureId)
 
   const expandedResponse=await runExpandedMarkets(new Request(u.toString()))
@@ -62,7 +60,7 @@ export default async(request:Request)=>{
     source:'eve-player-intelligence',
     job_name:'lineup-history-enrichment',
     status:'success',
-    rows_upserted:Number(sync?.statsWritten??0),
+    rows_upserted:Number(sync?.stats??0),
     started_at:new Date().toISOString(),
     finished_at:new Date().toISOString(),
     error_message:JSON.stringify({fixtureId,sync,relink,expanded,calibrationPublished:calibration?.totalPublished??null,comboWritten:combo?.written??null}).slice(0,5000),
