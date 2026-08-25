@@ -66,6 +66,13 @@ type ExpandedSignal = {
   referee?: { name: string; cardsPerMatch?: number; matchesSample?: number } | null
   lineupsConfirmed: boolean
   refereeConfirmed: boolean
+  fairProbability?: number | null
+  fairOdds?: number | null
+  bestBookmaker?: string | null
+  bestOdds?: number | null
+  edgePct?: number | null
+  expectedValuePct?: number | null
+  valueStatus?: ValueStatus | null
 }
 
 type SetupFixture = {
@@ -230,22 +237,23 @@ function BestBetsPage({ supabase }: { supabase: any }) {
 function MarketLabPage({ supabase }: { supabase: any }) {
   const [signals,setSignals]=useState<ExpandedSignal[]>([])
   const [filter,setFilter]=useState('all')
-  const [message,setMessage]=useState('Loading expanded markets…')
+  const [message,setMessage]=useState('Loading calibrated expanded markets…')
   useEffect(()=>{
     if(!supabase){setMessage('Supabase is not connected');return}
     supabase.from('scanner_expanded_markets').select('*').order('confidence',{ascending:false}).limit(100).then(({data,error}:any)=>{
-      if(error){setMessage(`Run SETUP_EXPANSION_V1.sql in Supabase first: ${error.message}`);return}
-      setSignals((data??[]) as ExpandedSignal[]);setMessage(`${data?.length??0} expanded research signals`)
+      if(error){setMessage(`Expanded value view not ready: ${error.message}`);return}
+      setSignals((data??[]) as ExpandedSignal[]);setMessage(`${data?.length??0} calibrated expanded signals`)
     })
   },[supabase])
   const filtered=signals.filter((s)=>filter==='all'||s.market===filter)
   const marketNames=[...new Set(signals.map((s)=>s.market))]
+  const valueCount=signals.filter((s)=>s.valueStatus==='value'||s.valueStatus==='strong').length
   return <>
-    <PageIntro eyebrow="EXPANDED MARKET LAB" title="More markets. Same evidence discipline." text="BTTS, goals per team, goals by half, overall match cards and overall match corners. Team cards and team corners remain in the calibrated core scanner." status={message}/>
+    <PageIntro eyebrow="EXPANDED MARKET LAB" title="Calibrated signals. Then check the price." text="BTTS, goals per team, goals by half, overall match cards and overall match corners. Each surviving signal uses its own 2025/26 walk-forward threshold and conservative fair probability." status={message}/>
     <section className="info-panel"><CheckCircle2 size={18}/><div><strong>Home/Away differentiation is built in.</strong><span>If a team is at home, EVE weights its home-only history against the opponent's away-only history. Recent 10, season form, H2H, referee and confirmed starting XI context are layered around that venue split.</span></div></section>
-    <section className="research-panel"><strong>Research markets</strong><span>These new markets are being recorded and settled automatically, but they stay separate from Best Bets until their own walk-forward calibration proves the thresholds.</span></section>
+    <section className="research-panel"><strong>2026/27 out-of-sample validation</strong><span>These markets passed their 2025/26 walk-forward calibration, but remain in Market Lab while the new season validates them. Current value flags: <strong>{valueCount}</strong>. VALUE / STRONG VALUE means the current bookmaker price clears EVE's conservative edge and EV rules; NO VALUE means skip at that price.</span></section>
     <div className="tabs wide-tabs"><button className={filter==='all'?'active':''} onClick={()=>setFilter('all')}>All</button>{marketNames.map((m)=><button key={m} className={filter===m?'active':''} onClick={()=>setFilter(m)}>{expandedLabels[m]??m}</button>)}</div>
-    {filtered.length ? <div className="pick-grid expanded-grid">{filtered.map((s)=><ExpandedCard key={s.id} signal={s}/>)}</div> : <Empty text="No expanded signals yet. They will populate after the expansion SQL is run and the next analysis executes."/>}
+    {filtered.length ? <div className="pick-grid expanded-grid">{filtered.map((s)=><ExpandedCard key={s.id} signal={s}/>)}</div> : <Empty text="No calibrated expanded signals currently qualify."/>}
   </>
 }
 
@@ -351,7 +359,11 @@ function PickCard({pick,rank}:{pick:Pick;rank:number}){
     {(pick.fairOdds!=null||pick.bestOdds!=null)&&<div className="value-metrics"><Metric label="Fair odds" value={pick.fairOdds!=null?Number(pick.fairOdds).toFixed(2):'—'}/><Metric label="Best odds" value={pick.bestOdds!=null?Number(pick.bestOdds).toFixed(2):'—'}/><Metric label="Edge" value={pick.edgePct!=null?`${Number(pick.edgePct).toFixed(1)}%`:'—'}/><Metric label="EV" value={pick.expectedValuePct!=null?`${Number(pick.expectedValuePct).toFixed(1)}%`:'—'}/></div>}
     <EvidenceGrid evidence={pick.evidence??[]} id={pick.id}/>{pick.referee&&<div className="referee-line"><UserRoundCheck size={16}/><div><span>{pick.referee.name}</span><strong>{Number(pick.referee.cardsPerMatch??0).toFixed(1)} cards/match</strong></div></div>}<div className="quality-line"><span>Data quality</span><strong>{pick.dataQuality}%</strong></div></article>
 }
-function ExpandedCard({signal}:{signal:ExpandedSignal}){return <article className="pick-card expanded-card"><div className="pick-top"><div className="research-tag">RESEARCH</div><div className={`grade grade-${signal.grade.replace('+','plus').toLowerCase()}`}>{signal.grade}</div></div><div className="league-line">{signal.country} · {signal.league} · {signal.kickoff}</div><h4>{signal.homeTeam} <span>vs</span> {signal.awayTeam}</h4><div className="selection"><BarChart3 size={17}/><span>{signal.selection}</span></div><div className="context-badges inline-badges"><i className={signal.refereeConfirmed?'ok':''}>REF</i><i className={signal.lineupsConfirmed?'ok':''}>XI</i></div><div className="confidence-row"><span>EVE research score</span><strong>{signal.confidence}%</strong></div><div className="meter"><i style={{width:`${signal.confidence}%`}}/></div><EvidenceGrid evidence={signal.evidence??[]} id={signal.id}/><div className="quality-line"><span>Data quality</span><strong>{signal.dataQuality}%</strong></div></article>}
+function ExpandedCard({signal}:{signal:ExpandedSignal}){return <article className="pick-card expanded-card"><div className="pick-top"><div className="research-tag">OOS RESEARCH</div><div className={`grade grade-${signal.grade.replace('+','plus').toLowerCase()}`}>{signal.grade}</div></div><div className="league-line">{signal.country} · {signal.league} · {signal.kickoff}</div><h4>{signal.homeTeam} <span>vs</span> {signal.awayTeam}</h4><div className="selection"><BarChart3 size={17}/><span>{signal.selection}</span></div>
+  {signal.valueStatus&&<div className={`value-strip value-${signal.valueStatus}`}><div><CircleDollarSign size={16}/><strong>{valueLabel(signal.valueStatus)}</strong></div><span>{signal.bestOdds?`${signal.bestBookmaker??'Best price'} ${Number(signal.bestOdds).toFixed(2)}`:'No compatible price available yet'}</span></div>}
+  <div className="context-badges inline-badges"><i className={signal.refereeConfirmed?'ok':''}>REF</i><i className={signal.lineupsConfirmed?'ok':''}>XI</i></div><div className="confidence-row"><span>EVE calibrated score</span><strong>{signal.confidence}%</strong></div><div className="meter"><i style={{width:`${signal.confidence}%`}}/></div>
+  {(signal.fairOdds!=null||signal.bestOdds!=null)&&<div className="value-metrics"><Metric label="Fair odds" value={signal.fairOdds!=null?Number(signal.fairOdds).toFixed(2):'—'}/><Metric label="Best odds" value={signal.bestOdds!=null?Number(signal.bestOdds).toFixed(2):'—'}/><Metric label="Edge" value={signal.edgePct!=null?`${Number(signal.edgePct).toFixed(1)}%`:'—'}/><Metric label="EV" value={signal.expectedValuePct!=null?`${Number(signal.expectedValuePct).toFixed(1)}%`:'—'}/></div>}
+  <EvidenceGrid evidence={signal.evidence??[]} id={signal.id}/><div className="quality-line"><span>Data quality</span><strong>{signal.dataQuality}%</strong></div></article>}
 function EvidenceGrid({evidence,id}:{evidence:Evidence[];id:string}){return <div className="evidence-grid">{evidence.map((e)=><div className="evidence" key={`${id}-${e.key}`}><span>{e.label}</span><strong>{e.display}</strong><small>{e.score}/100 factor</small></div>)}</div>}
 function Metric({label,value}:{label:string;value:string}){return <div><span>{label}</span><strong>{value}</strong></div>}
 function PlayerTable({team,rows}:{team:string;rows:PlayerOutlook[]}){return <div className="player-table-wrap"><h4>{team}</h4><div className="player-table"><div className="player-row player-head"><span>Player</span><span>Matches</span><span>Shots</span><span>SOT</span><span>Goals</span><span>Cards</span></div>{rows.map((p)=><div className="player-row" key={p.playerId}><span><strong>{p.name}</strong><small>{p.position??'—'}</small></span><span>{p.matchesSample??0}</span><span>{p.avgShots??'—'}</span><span>{p.avgShotsOnTarget??'—'}</span><span>{p.avgGoals??'—'}</span><span>{p.avgYellowCards??'—'}</span></div>)}</div></div>}
