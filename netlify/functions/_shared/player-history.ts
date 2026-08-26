@@ -7,6 +7,18 @@ function slug(v:string){ return clean(v).replace(/ /g,'-') }
 function num(v:any){ const n=Number(typeof v==='object'&&v?(v.value??v.stat??v.total??NaN):v); return Number.isFinite(n)?n:null }
 function key(v:any){ return String(v??'').toLowerCase().replace(/[^a-z0-9]+/g,'') }
 function sleep(ms:number){ return new Promise((r)=>setTimeout(r,ms)) }
+function text(v:any):string{
+  if(v==null) return ''
+  if(typeof v==='string'||typeof v==='number') return String(v).trim()
+  if(typeof v==='object') return String(v.fullName??v.text??v.name??[v.firstName,v.lastName].filter(Boolean).join(' ')??'').trim()
+  return ''
+}
+function flatten(v:any):any[]{
+  if(!Array.isArray(v)) return []
+  const out:any[]=[]
+  for(const item of v){ if(Array.isArray(item)) out.push(...flatten(item)); else if(item!=null) out.push(item) }
+  return out
+}
 
 function findStat(node:any,aliases:string[]):number|null{
   if(node==null) return null
@@ -29,7 +41,7 @@ async function fetchJson(urls:string[]){
   let last='FotMob request failed'
   for(const url of urls){
     try{
-      const r=await fetch(url,{headers:{accept:'application/json,text/plain,*/*','user-agent':'Mozilla/5.0 EVE-Football-Scanner/0.4'}})
+      const r=await fetch(url,{headers:{accept:'application/json,text/plain,*/*','user-agent':'Mozilla/5.0 EVE-Football-Scanner/0.7'}})
       if(!r.ok){ last=`${r.status} ${r.statusText}`; if(r.status===429) await sleep(1500); continue }
       const body=await r.json(); if(body&&typeof body==='object') return body
       last='Unexpected FotMob payload'
@@ -74,10 +86,12 @@ function detailKickoff(payload:any){
 
 function detailTeams(payload:any){
   const header=Array.isArray(payload?.header?.teams)?payload.header.teams:[]
-  if(header.length>=2) return header.slice(0,2).map((t:any)=>({id:String(t?.id??''),name:String(t?.name??'')}))
+  if(header.length>=2) return header.slice(0,2).map((t:any)=>({id:text(t?.id),name:text(t?.name)}))
   const home=payload?.content?.lineup?.homeTeam
   const away=payload?.content?.lineup?.awayTeam
-  if(home&&away) return [{id:String(home?.id??''),name:String(home?.name??'')},{id:String(away?.id??''),name:String(away?.name??'')}]
+  if(home&&away) return [{id:text(home?.id??home?.teamId),name:text(home?.name)},{id:text(away?.id??away?.teamId),name:text(away?.name)}]
+  const groups=payload?.content?.lineup?.lineup
+  if(Array.isArray(groups)&&groups.length>=2) return groups.slice(0,2).map((g:any)=>({id:text(g?.teamId??g?.team?.id),name:text(g?.team?.name)}))
   return []
 }
 
@@ -89,7 +103,7 @@ function allEvents(payload:any){
 function eventCount(events:any[],playerId:string,typeWords:string[]){
   const wanted=typeWords.map(key)
   return events.filter((e)=>{
-    const pid=String(e?.player?.id??e?.playerId??e?.player?.playerId??'')
+    const pid=text(e?.player?.id??e?.playerId??e?.player?.playerId)
     if(pid!==playerId) return false
     const type=key(e?.type??e?.eventType??e?.card??'')
     return wanted.some((w)=>type.includes(w))
@@ -97,16 +111,20 @@ function eventCount(events:any[],playerId:string,typeWords:string[]){
 }
 
 function lineupGroups(payload:any){
+  const current=payload?.content?.lineup?.lineup
+  if(Array.isArray(current)){
+    return current.map((g:any)=>({teamId:text(g?.teamId??g?.team?.id),players:flatten(g?.players??g?.optaLineup?.players).map((p:any)=>({...p,isStarter:true}))}))
+  }
   const direct=payload?.content?.lineup?.lineups ?? payload?.content?.lineup2?.lineups
-  if(Array.isArray(direct)) return direct.map((g:any)=>({teamId:String(g?.teamId??g?.team?.id??''),players:Array.isArray(g?.players)?g.players:[]}))
+  if(Array.isArray(direct)) return direct.map((g:any)=>({teamId:text(g?.teamId??g?.team?.id),players:flatten(g?.players)}))
   const line=payload?.content?.lineup
   const out:any[]=[]
   for(const side of ['homeTeam','awayTeam'] as const){
     const team=line?.[side]
     if(!team) continue
-    const starters=(Array.isArray(team?.starters)?team.starters:[]).map((p:any)=>({...p,isStarter:true}))
-    const subs=(Array.isArray(team?.subs)?team.subs:Array.isArray(team?.substitutes)?team.substitutes:[]).map((p:any)=>({...p,isStarter:false}))
-    out.push({teamId:String(team?.id??team?.teamId??''),players:[...starters,...subs]})
+    const starters=flatten(team?.starters).map((p:any)=>({...p,isStarter:true}))
+    const subs=flatten(team?.subs??team?.substitutes).map((p:any)=>({...p,isStarter:false}))
+    out.push({teamId:text(team?.id??team?.teamId),players:[...starters,...subs]})
   }
   return out
 }
@@ -126,7 +144,7 @@ async function mapDbFixture(supabase:Supabase,teamId:string,kickoff:Date){
 async function upsertDetail(supabase:Supabase,dbFixture:any,payload:any,currentInternalTeamId:string,currentFotmobTeamId:string){
   const teams=detailTeams(payload)
   if(teams.length<2) return {players:0,stats:0,lineups:0,reason:'No team identities in match detail'}
-  const homeFotmob=String(teams[0].id),awayFotmob=String(teams[1].id)
+  const homeFotmob=text(teams[0].id),awayFotmob=text(teams[1].id)
   const currentIsHome=homeFotmob===currentFotmobTeamId
   const currentIsAway=awayFotmob===currentFotmobTeamId
   if(!currentIsHome&&!currentIsAway) return {players:0,stats:0,lineups:0,reason:'Current FotMob team not present in detail'}
@@ -138,27 +156,28 @@ async function upsertDetail(supabase:Supabase,dbFixture:any,payload:any,currentI
   const events=allEvents(payload)
   let players=0,stats=0,lineups=0
   for(const group of lineupGroups(payload)){
-    const internalTeamId=teamMap.get(String(group.teamId))
+    const internalTeamId=teamMap.get(text(group.teamId))
     if(!internalTeamId) continue
-    const groupPlayers=Array.isArray(group.players)?group.players:[]
+    const groupPlayers=flatten(group.players)
     for(let idx=0;idx<groupPlayers.length;idx+=1){
       const item=groupPlayers[idx]
       const p=item?.player??item
-      const rawId=String(p?.id??p?.playerId??item?.id??'')
-      const name=String(p?.name??p?.playerName??item?.name??'').trim()
-      if(!name) continue
+      const rawId=text(p?.id??p?.playerId??item?.id)
+      const name=text(p?.name??p?.playerName??item?.name)
+      if(!name||name==='[object Object]') continue
       const sourcePlayerId=rawId||`name:${internalTeamId}:${slug(name)}`
-      const position=String(p?.positionString??p?.position??item?.position??'').trim()||null
+      const localized=p?.localizedPosition??item?.localizedPosition
+      const position=text(p?.positionStringShort??p?.positionString??p?.position??localized?.label??localized?.text??item?.position)||null
       const {data:player,error:playerError}=await supabase.from('players').upsert({source:'fotmob',source_player_id:sourcePlayerId,name,current_team_id:internalTeamId,position,updated_at:new Date().toISOString()},{onConflict:'source,source_player_id'}).select('id').single()
       if(playerError||!player?.id) continue
       players+=1
       const explicitStarter=p?.isStarter??item?.isStarter??item?.starter
       const started=typeof explicitStarter==='boolean'?explicitStarter:idx<11
       if(started){
-        const {error}=await supabase.from('fixture_lineups').upsert({fixture_id:dbFixture.id,team_id:internalTeamId,player_id:player.id,is_starting:true,shirt_number:num(p?.shirtNumber??item?.shirtNumber),position,source:'fotmob',confirmed_at:new Date().toISOString()},{onConflict:'fixture_id,player_id,source'})
+        const {error}=await supabase.from('fixture_lineups').upsert({fixture_id:dbFixture.id,team_id:internalTeamId,player_id:player.id,is_starting:true,shirt_number:num(p?.shirtNumber??p?.shirt??item?.shirtNumber??item?.shirt),position,source:'fotmob',confirmed_at:new Date().toISOString()},{onConflict:'fixture_id,player_id,source'})
         if(!error) lineups+=1
       }
-      const playerShots=shotmap.filter((s:any)=>String(s?.playerId??s?.player?.id??'')===rawId)
+      const playerShots=shotmap.filter((s:any)=>text(s?.playerId??s?.player?.id)===rawId)
       const shots=playerShots.length||findStat(p,['shots','total shots','shot attempts'])||findStat(item,['shots','total shots'])||0
       const sotMap=playerShots.filter((s:any)=>Boolean(s?.isOnTarget)||['goal','attemptsaved','saved'].some((w)=>key(s?.eventType??s?.type).includes(w))).length
       const sot=sotMap||findStat(p,['shots on target','shotsontarget','ontarget'])||findStat(item,['shots on target','shotsontarget'])||0
@@ -166,7 +185,7 @@ async function upsertDetail(supabase:Supabase,dbFixture:any,payload:any,currentI
       const assists=findStat(p,['assists','assist'])||findStat(item,['assists'])||0
       const yellows=eventCount(events,rawId,['yellowcard','yellow'])||findStat(p,['yellow cards','yellowcards'])||0
       const reds=eventCount(events,rawId,['redcard','red'])||findStat(p,['red cards','redcards'])||0
-      const minutes=findStat(p,['minutes played','minutes','mins'])??findStat(item,['minutes played','minutes'])
+      const minutes=num(p?.minutesPlayed??item?.minutesPlayed)??findStat(p,['minutes played','minutes','mins'])??findStat(item,['minutes played','minutes'])
       const foulsCommitted=findStat(p,['fouls committed','fouls'])??findStat(item,['fouls committed'])
       const foulsWon=findStat(p,['fouls won','was fouled'])??findStat(item,['fouls won'])
       const xg=findStat(p,['expected goals','xg'])??findStat(item,['expected goals','xg'])
@@ -182,8 +201,8 @@ export async function loadFixturePlayerHistory(supabase:Supabase,fixtureId:strin
   const {data:fixture,error}=await supabase.from('fixtures').select('id,kickoff,home_team_id,away_team_id,match_context').eq('id',fixtureId).maybeSingle()
   if(error||!fixture) throw new Error(error?.message??'Fixture not found')
   const specs=[
-    {internalId:fixture.home_team_id,fotmobId:String(fixture.match_context?.fotmob_home_team_id??'')},
-    {internalId:fixture.away_team_id,fotmobId:String(fixture.match_context?.fotmob_away_team_id??'')},
+    {internalId:fixture.home_team_id,fotmobId:text(fixture.match_context?.fotmob_home_team_id)},
+    {internalId:fixture.away_team_id,fotmobId:text(fixture.match_context?.fotmob_away_team_id)},
   ].filter((x)=>x.fotmobId)
   const processed=new Set<string>()
   let mappedMatches=0,players=0,stats=0,lineups=0
