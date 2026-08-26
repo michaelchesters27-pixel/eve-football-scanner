@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js'
+import syncMatchdayContext from './sync-matchday-context'
 
 function env(name:string){ const v=process.env[name]; if(!v) throw new Error(`Missing required environment variable: ${name}`); return v }
 function json(data:any,status=200){ return new Response(JSON.stringify(data),{status,headers:{'content-type':'application/json'}}) }
@@ -20,15 +21,26 @@ export default async(request:Request)=>{
     }
     if(!fixtureId) return json({ok:false,error:'No active fixture with confirmed starting XIs was found.'},404)
 
+    const matchdayUrl=new URL(url.toString())
+    matchdayUrl.search=`?fixture_id=${encodeURIComponent(fixtureId)}`
+    let matchday:any=null
+    try{
+      const matchdayResponse=await syncMatchdayContext(new Request(matchdayUrl.toString()))
+      matchday=await matchdayResponse.json()
+    }catch(error){
+      matchday={ok:false,error:error instanceof Error?error.message:String(error)}
+    }
+
     const target=new URL('/.netlify/functions/enrich-lineup-history-background',url.origin)
     target.searchParams.set('fixture_id',fixtureId)
     const response=await fetch(target.toString(),{method:'GET'})
-    if(!response.ok&&response.status!==202) return json({ok:false,fixtureId,error:`Background enrichment returned ${response.status}`},502)
+    if(!response.ok&&response.status!==202) return json({ok:false,fixtureId,matchday,error:`Background enrichment returned ${response.status}`},502)
     return json({
       ok:true,
       fixtureId,
       started:true,
-      note:'Targeted XI enrichment started. EVE will seek up to 10 recent appearances for each confirmed FotMob starter, cache the usable form, then rerun expanded markets and combos. Refresh Match Setup after a few minutes.',
+      matchday,
+      note:'Match-day context was refreshed first, including referee-history reconciliation. Targeted XI enrichment is now rebuilding up to 10 recent appearances per confirmed starter with the corrected booking parser, then EVE reruns expanded markets and combos.',
     })
   }catch(error){ return json({ok:false,error:error instanceof Error?error.message:String(error)},500) }
 }
