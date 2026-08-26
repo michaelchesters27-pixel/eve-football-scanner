@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js'
 import { loadFixturePlayerHistory } from './_shared/player-history'
+import { loadConfirmedStarterFormCache } from './_shared/player-form-cache'
 import runExpandedMarkets from './run-expanded-markets'
 import applyExpandedCalibration from './apply-expanded-calibration'
 import runCombos from './run-combos'
@@ -38,11 +39,18 @@ export default async(request:Request)=>{
   if(!fixtureId) throw new Error('fixture_id is required')
   const supabase=createClient(env('SUPABASE_URL'),env('SUPABASE_SERVICE_ROLE_KEY'),{auth:{persistSession:false,autoRefreshToken:false}})
 
+  const startedAt=new Date().toISOString()
   const u=new URL(request.url)
   u.search=`?fixture_id=${encodeURIComponent(fixtureId)}`
 
+  // Keep mapping whatever can be linked to EVE's finished-fixture history.
   const sync=await loadFixturePlayerHistory(supabase,fixtureId,10)
   const relink=await relinkManualPlayers(supabase,fixtureId)
+
+  // Then fill a fixture-scoped 10-appearance cache directly from each confirmed
+  // FotMob starter. This avoids treating a missing historical fixture mapping as
+  // zero player form and gives transferred/newly-mapped teams usable XI depth.
+  const formCache=await loadConfirmedStarterFormCache(supabase,fixtureId,10)
 
   const expandedResponse=await runExpandedMarkets(new Request(u.toString()))
   if(!expandedResponse.ok) throw new Error(`Expanded re-analysis failed: ${await expandedResponse.text()}`)
@@ -56,13 +64,23 @@ export default async(request:Request)=>{
   if(!comboResponse.ok) throw new Error(`Combo refresh failed: ${await comboResponse.text()}`)
   const combo=await comboResponse.json()
 
+  const status=formCache.setupRequired?'partial':'success'
   await supabase.from('source_sync_runs').insert({
     source:'eve-player-intelligence',
     job_name:'lineup-history-enrichment',
-    status:'success',
-    rows_upserted:Number(sync?.stats??0),
-    started_at:new Date().toISOString(),
+    status,
+    rows_upserted:Number(sync?.stats??0)+Number(formCache?.cachedPlayers??0),
+    started_at:startedAt,
     finished_at:new Date().toISOString(),
-    error_message:JSON.stringify({fixtureId,sync,relink,expanded,calibrationPublished:calibration?.totalPublished??null,comboWritten:combo?.written??null}).slice(0,5000),
+    error_message:JSON.stringify({
+      fixtureId,
+      mappedHistory:sync,
+      formCache,
+      relink,
+      expanded,
+      calibrationPublished:calibration?.totalPublished??null,
+      comboWritten:combo?.written??null,
+      rule:'XI form is only considered usable after at least 5 appearances; target depth is 10.',
+    }).slice(0,5000),
   })
 }
