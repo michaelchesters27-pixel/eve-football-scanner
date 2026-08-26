@@ -59,6 +59,22 @@
 .prob-row strong { color:#73df99; font-size:14px; white-space:nowrap; }
 .prob-row.treble { border-color:rgba(95,205,136,.22); background:rgba(42,140,78,.08); }
 
+.event-date { display:inline-flex; align-items:center; width:max-content; max-width:100%; margin:7px 0 4px; padding:6px 9px; border-radius:9px; border:1px solid rgba(111,216,149,.18); background:rgba(42,139,77,.10); color:#8de5aa; font-size:10px; font-weight:900; letter-spacing:.045em; }
+.compact-date { margin-top:8px; font-size:9px; }
+.matchday-status-panel { display:grid; gap:8px; margin:0 0 16px; padding:16px; border:1px solid rgba(104,205,142,.16); border-radius:15px; background:rgba(26,72,43,.13); }
+.matchday-row { display:flex; justify-content:space-between; gap:18px; align-items:center; padding:9px 0; border-bottom:1px solid rgba(255,255,255,.045); }
+.matchday-row:last-of-type { border-bottom:0; }
+.matchday-row span { color:#6e8277; font-size:10px; text-transform:uppercase; letter-spacing:.06em; }
+.matchday-row strong { color:#a7b8ae; font-size:11px; text-align:right; }
+.matchday-row .confirmed-text { color:#75df9a; }
+.matchday-row .waiting-text { color:#d7b86f; }
+.matchday-row .active-text { color:#84d8ff; }
+.matchday-status-panel p { margin:5px 0 0; color:#73887c; font-size:10px; line-height:1.55; }
+.manual-toggle { display:inline-flex; align-items:center; border:1px solid rgba(255,255,255,.08); background:rgba(255,255,255,.025); color:#91a59a; border-radius:10px; padding:9px 12px; cursor:pointer; font-size:10px; font-weight:800; }
+.manual-toggle:hover { color:#d9e9df; border-color:rgba(118,210,151,.2); }
+.manual-override { margin-top:14px; padding-top:15px; border-top:1px solid rgba(255,255,255,.055); }
+.override-note { margin-bottom:14px; padding:10px 12px; border-radius:10px; background:rgba(142,105,38,.08); border:1px solid rgba(205,163,82,.13); color:#9b8a69; font-size:10px; line-height:1.5; }
+
 @media (max-width:1080px){
   .topbar { height:auto; min-height:76px; padding-top:10px; padding-bottom:10px; gap:10px; }
   .header-right { flex-direction:column-reverse; align-items:flex-end; }
@@ -77,4 +93,6 @@
   .research-panel { align-items:flex-start; flex-direction:column; }
   .research-panel span { text-align:left; }
   .fixture-heading { align-items:flex-start; flex-direction:column; }
+  .matchday-row { align-items:flex-start; flex-direction:column; gap:4px; }
+  .matchday-row strong { text-align:left; }
 }
