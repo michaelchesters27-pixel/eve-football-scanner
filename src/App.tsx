@@ -31,6 +31,7 @@ type Pick = {
   homeTeam: string
   awayTeam: string
   kickoff: string
+  kickoffUtc?: string | null
   market: CoreMarket
   selection: string
   confidence: number
@@ -55,6 +56,7 @@ type ExpandedSignal = {
   homeTeam: string
   awayTeam: string
   kickoff: string
+  kickoffUtc?: string | null
   market: string
   selection: string
   confidence: number
@@ -137,9 +139,68 @@ const expandedLabels: Record<string, string> = {
   match_corners: 'Overall Match Corners',
 }
 
+const LONDON = 'Europe/London'
+
 function pageFromHash(): Page {
   const value = window.location.hash.replace(/^#\/?/, '')
   return ['best', 'markets', 'setup', 'combos'].includes(value) ? value as Page : 'best'
+}
+
+function parsedDate(value?: string | null) {
+  if (!value) return null
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? null : date
+}
+
+function londonParts(date: Date) {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: LONDON,
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hourCycle: 'h23',
+  }).formatToParts(date)
+  const get = (type: string) => Number(parts.find((p) => p.type === type)?.value ?? 0)
+  return { year: get('year'), month: get('month'), day: get('day'), hour: get('hour') }
+}
+
+function londonDayIndex(date: Date) {
+  const p = londonParts(date)
+  return Math.floor(Date.UTC(p.year, p.month - 1, p.day) / 86400000)
+}
+
+function dayDiff(value?: string | null) {
+  const date = parsedDate(value)
+  if (!date) return null
+  return londonDayIndex(date) - londonDayIndex(new Date())
+}
+
+function inPreferredWindow(value?: string | null) {
+  const date = parsedDate(value)
+  if (!date) return true
+  const diff = dayDiff(value)
+  if (diff == null || diff < 0 || diff > 4) return false
+  return date.getTime() >= Date.now() - 3 * 3600000
+}
+
+function kickoffSort(value?: string | null) {
+  const date = parsedDate(value)
+  return date ? date.getTime() : Number.MAX_SAFE_INTEGER
+}
+
+function eventDateLabel(value?: string | null, fallback = '') {
+  const date = parsedDate(value)
+  if (!date) return fallback
+  const diff = dayDiff(value)
+  const dateText = date.toLocaleDateString('en-GB', { timeZone: LONDON, weekday: 'short', day: '2-digit', month: 'short' })
+  const timeText = date.toLocaleTimeString('en-GB', { timeZone: LONDON, hour: '2-digit', minute: '2-digit', hour12: false })
+  const hour = londonParts(date).hour
+  if (diff === 0) return `${hour >= 17 ? 'TONIGHT' : 'TODAY'} · ${dateText} · ${timeText}`
+  if (diff === 1) return `TOMORROW · ${dateText} · ${timeText}`
+  if (diff != null && diff >= 2 && diff <= 4) return `${dateText} · ${timeText} · IN ${diff} DAYS`
+  return `${dateText} · ${timeText}`
+}
+
+function hoursUntil(value: string) {
+  const date = parsedDate(value)
+  return date ? (date.getTime() - Date.now()) / 3600000 : 999
 }
 
 function App() {
@@ -184,7 +245,7 @@ function App() {
         {page === 'setup' && <MatchSetupPage supabase={supabase} />}
         {page === 'combos' && <ComboLabPage supabase={supabase} />}
       </main>
-      <footer>EVE Football Scanner · Rolling historical evidence · Home/Away aware · Value filtered</footer>
+      <footer>EVE Football Scanner · Next 4 days prioritised · Rolling historical evidence · Home/Away aware · Value filtered</footer>
     </div>
   )
 }
@@ -196,40 +257,41 @@ function BestBetsPage({ supabase }: { supabase: any }) {
 
   useEffect(() => {
     if (!supabase) { setMessage('Supabase is not connected'); return }
-    supabase.from('scanner_best_bets').select('*').order('confidence', { ascending: false }).limit(50).then(({ data, error }: any) => {
+    supabase.from('scanner_best_bets').select('*').order('confidence', { ascending: false }).limit(80).then(({ data, error }: any) => {
       if (error) { setMessage(`Scanner view error: ${error.message}`); return }
-      setPicks((data ?? []) as Pick[])
-      setMessage(data?.length ? 'Live calibrated candidates from the full scan' : 'No candidates currently pass the calibrated filters')
+      const rows = ((data ?? []) as Pick[]).filter((p) => inPreferredWindow(p.kickoffUtc)).sort((a,b) => kickoffSort(a.kickoffUtc)-kickoffSort(b.kickoffUtc) || b.confidence-a.confidence)
+      setPicks(rows)
+      setMessage(rows.length ? `${rows.length} calibrated candidates in the next 4 days` : 'No calibrated candidates in the next 4 days')
     })
   }, [supabase])
 
-  const filtered = useMemo(() => picks.filter((p) => activeMarket === 'all' || p.market === activeMarket).sort((a,b) => b.confidence-a.confidence), [activeMarket,picks])
+  const filtered = useMemo(() => picks.filter((p) => activeMarket === 'all' || p.market === activeMarket), [activeMarket,picks])
   const topScore = picks.length ? Math.max(...picks.map((p) => p.confidence)) : 0
   const averageQuality = picks.length ? Math.round(picks.reduce((s,p) => s+p.dataQuality,0)/picks.length) : 0
   const valueCount = picks.filter((p) => p.valueStatus === 'value' || p.valueStatus === 'strong').length
 
   return <>
     <section className="hero compact-hero">
-      <div><div className="eyebrow">CALIBRATED LIVE SHORTLIST</div><h2>Strongest candidates.<br/><span>Then check the price.</span></h2><p>EVE continuously rolls completed matches into the next analysis, with home performance separated from away performance.</p></div>
+      <div><div className="eyebrow">CALIBRATED LIVE SHORTLIST</div><h2>Strongest candidates.<br/><span>Then check the price.</span></h2><p>EVE prioritises tonight and the next four calendar days, while completed matches continuously roll into the next analysis.</p></div>
       <div className="hero-status"><Database size={19}/><div><strong>Data status</strong><span>{message}</span></div></div>
     </section>
 
     <section className="kpis">
-      <Kpi icon={Trophy} label="Qualified candidates" value={String(picks.length)} detail="Survived calibrated filters" />
+      <Kpi icon={Trophy} label="Qualified candidates" value={String(picks.length)} detail="Next 4 days" />
       <Kpi icon={Sparkles} label="Top EVE score" value={`${topScore}%`} detail="Statistical score" />
       <Kpi icon={Database} label="Data quality" value={`${averageQuality}%`} detail="Coverage score" />
       <Kpi icon={CircleDollarSign} label="Value bets now" value={String(valueCount)} detail="VALUE / STRONG only" />
     </section>
 
     <section className="qualification-panel">
-      <div className="qualification-count"><Trophy size={20}/><strong>{picks.length} QUALIFIED FROM THE FULL SCAN</strong></div>
-      <p>EVE analyses all supported upcoming fixtures across team cards, team corners and goals. The {picks.length} shown here are the selections that survived the market-specific calibrated filters. <strong>They are the strongest statistical candidates — not automatically {picks.length} bets.</strong></p>
+      <div className="qualification-count"><Trophy size={20}/><strong>{picks.length} QUALIFIED IN THE NEXT 4 DAYS</strong></div>
+      <p>EVE analyses all supported upcoming fixtures, but this screen deliberately concentrates on the matches you can actually act on now. <strong>Every event carries its date and time, with tonight/tomorrow highlighted.</strong></p>
       <div className="qualification-rule"><CircleDollarSign size={17}/><span><strong>Final betting rule:</strong> VALUE or STRONG VALUE = candidate. NO VALUE = skip. WAITING PRICE = no decision yet.</span></div>
     </section>
 
     <section className="scanner-section">
       <div className="section-head"><div><div className="eyebrow">CURRENT QUALIFIERS</div><h3>Best Bets shortlist</h3></div><div className="tabs"><button className={activeMarket==='all'?'active':''} onClick={()=>setActiveMarket('all')}>All</button>{(Object.keys(coreMeta) as CoreMarket[]).map((m)=>{const Icon=coreMeta[m].icon;return <button key={m} className={activeMarket===m?'active':''} onClick={()=>setActiveMarket(m)}><Icon size={15}/>{coreMeta[m].label}</button>})}</div></div>
-      {filtered.length ? <div className="pick-grid">{filtered.map((pick,i)=><PickCard key={pick.id} pick={pick} rank={i+1}/>)}</div> : <Empty text="Nothing currently passes the calibrated shortlist."/>}
+      {filtered.length ? <div className="pick-grid">{filtered.map((pick,i)=><PickCard key={pick.id} pick={pick} rank={i+1}/>)}</div> : <Empty text="Nothing currently passes the calibrated shortlist inside the next four days."/>}
     </section>
   </>
 }
@@ -240,20 +302,21 @@ function MarketLabPage({ supabase }: { supabase: any }) {
   const [message,setMessage]=useState('Loading calibrated expanded markets…')
   useEffect(()=>{
     if(!supabase){setMessage('Supabase is not connected');return}
-    supabase.from('scanner_expanded_markets').select('*').order('confidence',{ascending:false}).limit(100).then(({data,error}:any)=>{
+    supabase.from('scanner_expanded_markets').select('*').order('confidence',{ascending:false}).limit(140).then(({data,error}:any)=>{
       if(error){setMessage(`Expanded value view not ready: ${error.message}`);return}
-      setSignals((data??[]) as ExpandedSignal[]);setMessage(`${data?.length??0} calibrated expanded signals`)
+      const rows=((data??[]) as ExpandedSignal[]).filter((s)=>inPreferredWindow(s.kickoffUtc)).sort((a,b)=>kickoffSort(a.kickoffUtc)-kickoffSort(b.kickoffUtc)||b.confidence-a.confidence)
+      setSignals(rows);setMessage(`${rows.length} calibrated expanded signals in the next 4 days`)
     })
   },[supabase])
   const filtered=signals.filter((s)=>filter==='all'||s.market===filter)
   const marketNames=[...new Set(signals.map((s)=>s.market))]
   const valueCount=signals.filter((s)=>s.valueStatus==='value'||s.valueStatus==='strong').length
   return <>
-    <PageIntro eyebrow="EXPANDED MARKET LAB" title="Calibrated signals. Then check the price." text="BTTS, goals per team, goals by half, overall match cards and overall match corners. Each surviving signal uses its own 2025/26 walk-forward threshold and conservative fair probability." status={message}/>
+    <PageIntro eyebrow="EXPANDED MARKET LAB" title="Calibrated signals. Then check the price." text="BTTS, goals per team, goals by half, overall match cards and overall match corners — prioritised from tonight through the next four days." status={message}/>
     <section className="info-panel"><CheckCircle2 size={18}/><div><strong>Home/Away differentiation is built in.</strong><span>If a team is at home, EVE weights its home-only history against the opponent's away-only history. Recent 10, season form, H2H, referee and confirmed starting XI context are layered around that venue split.</span></div></section>
     <section className="research-panel"><strong>2026/27 out-of-sample validation</strong><span>These markets passed their 2025/26 walk-forward calibration, but remain in Market Lab while the new season validates them. Current value flags: <strong>{valueCount}</strong>. VALUE / STRONG VALUE means the current bookmaker price clears EVE's conservative edge and EV rules; NO VALUE means skip at that price.</span></section>
     <div className="tabs wide-tabs"><button className={filter==='all'?'active':''} onClick={()=>setFilter('all')}>All</button>{marketNames.map((m)=><button key={m} className={filter===m?'active':''} onClick={()=>setFilter(m)}>{expandedLabels[m]??m}</button>)}</div>
-    {filtered.length ? <div className="pick-grid expanded-grid">{filtered.map((s)=><ExpandedCard key={s.id} signal={s}/>)}</div> : <Empty text="No calibrated expanded signals currently qualify."/>}
+    {filtered.length ? <div className="pick-grid expanded-grid">{filtered.map((s)=><ExpandedCard key={s.id} signal={s}/>)}</div> : <Empty text="No calibrated expanded signals currently qualify inside the next four days."/>}
   </>
 }
 
@@ -264,67 +327,110 @@ function MatchSetupPage({ supabase }: { supabase:any }) {
   const [homeText,setHomeText]=useState('')
   const [awayText,setAwayText]=useState('')
   const [players,setPlayers]=useState<PlayerOutlook[]>([])
-  const [status,setStatus]=useState('Select a fixture, enter the referee and confirmed starting XIs, then press Confirm & Reanalyse.')
+  const [notice,setNotice]=useState('')
   const [busy,setBusy]=useState(false)
+  const [manualOpen,setManualOpen]=useState(false)
 
-  const loadFixtures=()=>{
+  const loadFixtures=async()=>{
     if(!supabase)return
-    supabase.from('fixture_setup_board').select('*').order('kickoff',{ascending:true}).limit(120).then(({data,error}:any)=>{
-      if(error){setStatus(`Run SETUP_EXPANSION_V1.sql in Supabase first: ${error.message}`);return}
-      const rows=(data??[]) as SetupFixture[];setFixtures(rows);if(!selectedId&&rows[0])setSelectedId(rows[0].fixtureId)
-    })
+    const {data,error}=await supabase.from('fixture_setup_board').select('*').order('kickoff',{ascending:true}).limit(160)
+    if(error){setNotice(`Match Setup data error: ${error.message}`);return}
+    const rows=((data??[]) as SetupFixture[]).filter((f)=>inPreferredWindow(f.kickoff)).sort((a,b)=>kickoffSort(a.kickoff)-kickoffSort(b.kickoff))
+    setFixtures(rows)
+    setSelectedId((current)=>current&&rows.some((f)=>f.fixtureId===current)?current:(rows[0]?.fixtureId??''))
   }
-  useEffect(loadFixtures,[supabase])
+
+  useEffect(()=>{
+    if(!supabase)return
+    void loadFixtures()
+    const timer=window.setInterval(()=>void loadFixtures(),60000)
+    return()=>window.clearInterval(timer)
+  },[supabase])
+
   const selected=fixtures.find((f)=>f.fixtureId===selectedId)
 
   useEffect(()=>{
+    setManualOpen(false)
+    setNotice('')
+  },[selectedId])
+
+  useEffect(()=>{
     if(!supabase||!selectedId){setPlayers([]);return}
-    const current=fixtures.find((f)=>f.fixtureId===selectedId)
-    setReferee(current?.referee??'')
-    supabase.from('fixture_player_outlook').select('*').eq('fixtureId',selectedId).order('teamName').order('name').then(({data}:any)=>{
-      const rows=(data??[]) as PlayerOutlook[];setPlayers(rows)
-      if(current){
+    let cancelled=false
+    const load=async()=>{
+      const current=fixtures.find((f)=>f.fixtureId===selectedId)
+      const {data}=await supabase.from('fixture_player_outlook').select('*').eq('fixtureId',selectedId).order('teamName').order('name')
+      if(cancelled)return
+      const rows=(data??[]) as PlayerOutlook[]
+      setPlayers(rows)
+      if(!manualOpen&&current){
+        setReferee(current.referee??'')
         const home=rows.filter((p)=>p.teamId===current.homeTeamId).map((p)=>p.name)
         const away=rows.filter((p)=>p.teamId===current.awayTeamId).map((p)=>p.name)
-        if(home.length)setHomeText(home.join('\n'));else setHomeText('')
-        if(away.length)setAwayText(away.join('\n'));else setAwayText('')
+        setHomeText(home.join('\n'))
+        setAwayText(away.join('\n'))
       }
-    })
-  },[supabase,selectedId])
+    }
+    void load()
+    const timer=window.setInterval(()=>void load(),60000)
+    return()=>{cancelled=true;window.clearInterval(timer)}
+  },[supabase,selectedId,fixtures,manualOpen])
 
   const split=(text:string)=>text.split('\n').map((x)=>x.trim()).filter(Boolean)
   const confirm=async()=>{
-    if(!selected){return}
-    setBusy(true);setStatus('Saving match-day context and re-running EVE on this fixture…')
+    if(!selected)return
+    setBusy(true);setNotice('Saving manual override and re-running EVE on this fixture…')
     try{
-      const response=await fetch('/.netlify/functions/confirm-match-context',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({fixtureId:selected.fixtureId,refereeName:referee,homeLineup:split(homeText),awayLineup:split(awayText)})})
+      const response=await fetch('/.netlify/functions/confirm-match-context',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({fixtureId:selected.fixtureId,refereeName:referee,homeLineup:split(homeText),awayLineup:split(awayText),notes:'Manual override from Match Setup'})})
       const result=await response.json()
       if(!response.ok||!result.ok)throw new Error(result.error??'Confirmation failed')
-      setStatus(result.message)
-      loadFixtures()
+      setNotice(result.message)
+      await loadFixtures()
       const {data}=await supabase.from('fixture_player_outlook').select('*').eq('fixtureId',selected.fixtureId).order('teamName').order('name')
       setPlayers((data??[]) as PlayerOutlook[])
-    }catch(error){setStatus(error instanceof Error?error.message:String(error))}finally{setBusy(false)}
+    }catch(error){setNotice(error instanceof Error?error.message:String(error))}finally{setBusy(false)}
   }
 
+  const setupStatus=selected?matchdayStatus(selected):'Select a fixture. EVE will import referee and official starting XIs automatically close to kickoff.'
   const homeCount=split(homeText).length,awayCount=split(awayText).length
+  const autoActive=selected?hoursUntil(selected.kickoff)<=2.25&&hoursUntil(selected.kickoff)>=-0.5:false
+
   return <>
-    <PageIntro eyebrow="MATCH-DAY CONFIRMATION" title="Referee + Starting XI refinement" text="EVE already completes the normal pre-match analysis. When the referee and starting teams are confirmed, enter them here and EVE immediately re-runs the match with player history included." status={status}/>
+    <PageIntro eyebrow="MATCH-DAY AUTO CONFIRMATION" title="Referee + Starting XI intelligence" text="Manual typing is now the fallback. EVE automatically checks match-day data every 15 minutes inside roughly two hours of kickoff, imports the referee and official 11+11 starters, then re-runs the fixture." status={notice||setupStatus}/>
     <section className="setup-card">
-      <label>Fixture<select value={selectedId} onChange={(e)=>setSelectedId(e.target.value)}><option value="">Select fixture</option>{fixtures.map((f)=><option key={f.fixtureId} value={f.fixtureId}>{new Date(f.kickoff).toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})} · {f.homeTeam} v {f.awayTeam}</option>)}</select></label>
+      <label>Fixture<select value={selectedId} onChange={(e)=>setSelectedId(e.target.value)}><option value="">Select fixture</option>{fixtures.map((f)=><option key={f.fixtureId} value={f.fixtureId}>{eventDateLabel(f.kickoff)} · {f.homeTeam} v {f.awayTeam}</option>)}</select></label>
       {selected&&<>
-        <div className="fixture-heading"><div><span>{selected.country} · {selected.league}</span><strong>{selected.homeTeam} vs {selected.awayTeam}</strong></div><div className="context-badges"><i className={selected.refereeConfirmed?'ok':''}>REF {selected.refereeConfirmed?'CONFIRMED':'WAITING'}</i><i className={selected.lineupsConfirmed?'ok':''}>XI {selected.lineupsConfirmed?'CONFIRMED':'WAITING'}</i></div></div>
-        <label>Confirmed referee<input value={referee} onChange={(e)=>setReferee(e.target.value)} placeholder="e.g. Michael Oliver"/></label>
-        <div className="lineup-grid">
-          <label>{selected.homeTeam} starting XI <span>{homeCount}/11</span><textarea value={homeText} onChange={(e)=>setHomeText(e.target.value)} placeholder="One player per line" rows={13}/></label>
-          <label>{selected.awayTeam} starting XI <span>{awayCount}/11</span><textarea value={awayText} onChange={(e)=>setAwayText(e.target.value)} placeholder="One player per line" rows={13}/></label>
+        <div className="fixture-heading"><div><span>{selected.country} · {selected.league}</span><strong>{selected.homeTeam} vs {selected.awayTeam}</strong><div className="event-date compact-date">{eventDateLabel(selected.kickoff)}</div></div><div className="context-badges"><i className={selected.refereeConfirmed?'ok':''}>REF {selected.refereeConfirmed?'CONFIRMED':'WAITING'}</i><i className={selected.lineupsConfirmed?'ok':''}>XI {selected.lineupsConfirmed?'CONFIRMED':'WAITING'}</i></div></div>
+
+        <div className="matchday-status-panel">
+          <div className="matchday-row"><span>Referee</span><strong className={selected.refereeConfirmed?'confirmed-text':'waiting-text'}>{selected.refereeConfirmed?(selected.referee||'Confirmed'):'Awaiting referee confirmation'}</strong></div>
+          <div className="matchday-row"><span>Starting XIs</span><strong className={selected.lineupsConfirmed?'confirmed-text':'waiting-text'}>{selected.lineupsConfirmed?`CONFIRMED · ${selected.homeStarters} + ${selected.awayStarters} starters`:'AWAITING LINEUP CONFIRMATION'}</strong></div>
+          <div className="matchday-row"><span>Automatic checks</span><strong className={autoActive?'active-text':''}>{selected.refereeConfirmed&&selected.lineupsConfirmed?'MATCH-DAY DATA COMPLETE':autoActive?'ACTIVE · CHECKING EVERY 15 MINUTES':'STARTS ABOUT 2 HOURS BEFORE KICKOFF'}</strong></div>
+          <p>{selected.lineupsConfirmed?'Official starting teams have been imported and EVE has triggered the match-day re-analysis workflow.':'No action is required. EVE will keep the normal pre-match model running and wait for the official teams to be published. Lineups are commonly available around an hour before kickoff, but the scanner keeps checking because release times vary.'}</p>
         </div>
-        <button className="primary-action" disabled={busy} onClick={confirm}>{busy?<RefreshCw className="spin" size={17}/>:<CheckCircle2 size={17}/>}Confirm & Reanalyse</button>
+
+        <button className="manual-toggle" onClick={()=>setManualOpen((v)=>!v)}>{manualOpen?'Hide manual override':'Manual override'}</button>
+        {manualOpen&&<div className="manual-override">
+          <div className="override-note">Only use this if the automatic provider is late or wrong. Official auto-imported data will normally be used.</div>
+          <label>Referee<input value={referee} onChange={(e)=>setReferee(e.target.value)} placeholder="e.g. Michael Oliver"/></label>
+          <div className="lineup-grid">
+            <label>{selected.homeTeam} starting XI <span>{homeCount}/11</span><textarea value={homeText} onChange={(e)=>setHomeText(e.target.value)} placeholder="One player per line" rows={13}/></label>
+            <label>{selected.awayTeam} starting XI <span>{awayCount}/11</span><textarea value={awayText} onChange={(e)=>setAwayText(e.target.value)} placeholder="One player per line" rows={13}/></label>
+          </div>
+          <button className="primary-action" disabled={busy} onClick={confirm}>{busy?<RefreshCw className="spin" size={17}/>:<CheckCircle2 size={17}/>}Save manual override & Reanalyse</button>
+        </div>}
       </>}
     </section>
 
-    {selected&&<section className="player-section"><div className="section-head"><div><div className="eyebrow">PLAYER HISTORY</div><h3>Starting XI form used by EVE</h3></div></div>{players.length?<div className="player-tables"><PlayerTable team={selected.homeTeam} rows={players.filter((p)=>p.teamId===selected.homeTeamId)}/><PlayerTable team={selected.awayTeam} rows={players.filter((p)=>p.teamId===selected.awayTeamId)}/></div>:<Empty text="No confirmed lineup/player history is available yet. Enter the starting XIs above; player history will grow automatically as current-season matches are completed."/>}</section>}
+    {selected&&<section className="player-section"><div className="section-head"><div><div className="eyebrow">PLAYER HISTORY</div><h3>Starting XI form used by EVE</h3></div></div>{players.length?<div className="player-tables"><PlayerTable team={selected.homeTeam} rows={players.filter((p)=>p.teamId===selected.homeTeamId)}/><PlayerTable team={selected.awayTeam} rows={players.filter((p)=>p.teamId===selected.awayTeamId)}/></div>:<Empty text="Awaiting lineup confirmation. When the official starting teams are published, EVE will import all 22 starters automatically and attach the player history it has collected."/>}</section>}
   </>
+}
+
+function matchdayStatus(fixture:SetupFixture){
+  if(fixture.refereeConfirmed&&fixture.lineupsConfirmed)return'Match-day data confirmed — referee and both starting XIs are loaded.'
+  const hours=hoursUntil(fixture.kickoff)
+  if(hours<=2.25&&hours>=-0.5)return fixture.lineupsConfirmed?'Starting XIs confirmed — automatic check remains active for referee updates.':'Awaiting lineup confirmation — automatic match-day checks are active.'
+  return 'Pre-match analysis ready — automatic referee/XI checks begin about 2 hours before kickoff.'
 }
 
 function ComboLabPage({supabase}:{supabase:any}){
@@ -332,15 +438,16 @@ function ComboLabPage({supabase}:{supabase:any}){
   const [message,setMessage]=useState('Loading same-game analysis…')
   useEffect(()=>{
     if(!supabase){setMessage('Supabase is not connected');return}
-    supabase.from('combo_board').select('*').order('kickoff',{ascending:true}).limit(60).then(({data,error}:any)=>{
-      if(error){setMessage(`Run SETUP_EXPANSION_V1.sql in Supabase first: ${error.message}`);return}
-      setCombos((data??[]) as Combo[]);setMessage(`${data?.length??0} matches with empirical combo analysis`)
+    supabase.from('combo_board').select('*').order('kickoff',{ascending:true}).limit(100).then(({data,error}:any)=>{
+      if(error){setMessage(`Combo view error: ${error.message}`);return}
+      const rows=((data??[]) as Combo[]).filter((c)=>inPreferredWindow(c.kickoff)).sort((a,b)=>kickoffSort(a.kickoff)-kickoffSort(b.kickoff))
+      setCombos(rows);setMessage(`${rows.length} matches with empirical combo analysis in the next 4 days`)
     })
   },[supabase])
   return <>
-    <PageIntro eyebrow="SAME-GAME COMBINATION ENGINE" title="Singles, doubles and trebles" text="EVE measures how often the legs actually occurred together in comparable historical home/away matches. It does not pretend the legs are independent by simply multiplying percentages." status={message}/>
+    <PageIntro eyebrow="SAME-GAME COMBINATION ENGINE" title="Singles, doubles and trebles" text="EVE measures how often the legs actually occurred together in comparable historical home/away matches. Tonight and the next four days are prioritised." status={message}/>
     <section className="info-panel"><Layers3 size={18}/><div><strong>How to read this page</strong><span>Each single has its own historical joint-sample rate. Every two-leg combination gets a separate measured percentage. If three usable legs exist, EVE also shows the all-three treble rate.</span></div></section>
-    {combos.length?<div className="combo-grid">{combos.map((c)=><ComboCard key={c.id} combo={c}/>)}</div>:<Empty text="No combo analysis yet. It runs automatically after expanded-market analysis and also re-runs immediately when you confirm a referee/starting XI."/>}
+    {combos.length?<div className="combo-grid">{combos.map((c)=><ComboCard key={c.id} combo={c}/>)}</div>:<Empty text="No combo analysis currently falls inside the next four days."/>}
   </>
 }
 
@@ -353,13 +460,13 @@ function valueLabel(status?:ValueStatus|null){if(status==='strong')return'STRONG
 
 function PickCard({pick,rank}:{pick:Pick;rank:number}){
   const Icon=coreMeta[pick.market].icon
-  return <article className="pick-card"><div className="pick-top"><div className="rank">#{rank}</div><div className={`grade grade-${pick.grade.replace('+','plus').toLowerCase()}`}>{pick.grade}</div></div><div className="league-line">{pick.country} · {pick.league} · {pick.kickoff}</div><h4>{pick.homeTeam} <span>vs</span> {pick.awayTeam}</h4><div className="selection"><Icon size={17}/><span>{pick.selection}</span></div>
+  return <article className="pick-card"><div className="pick-top"><div className="rank">#{rank}</div><div className={`grade grade-${pick.grade.replace('+','plus').toLowerCase()}`}>{pick.grade}</div></div><div className="league-line">{pick.country} · {pick.league}</div><div className="event-date">{eventDateLabel(pick.kickoffUtc,pick.kickoff)}</div><h4>{pick.homeTeam} <span>vs</span> {pick.awayTeam}</h4><div className="selection"><Icon size={17}/><span>{pick.selection}</span></div>
     {pick.valueStatus&&<div className={`value-strip value-${pick.valueStatus}`}><div><CircleDollarSign size={16}/><strong>{valueLabel(pick.valueStatus)}</strong></div><span>{pick.bestOdds?`${pick.bestBookmaker??'Best price'} ${Number(pick.bestOdds).toFixed(2)}`:'No compatible price available yet'}</span></div>}
     <div className="confidence-row"><span>EVE statistical score</span><strong>{pick.confidence}%</strong></div><div className="meter"><i style={{width:`${pick.confidence}%`}}/></div>
     {(pick.fairOdds!=null||pick.bestOdds!=null)&&<div className="value-metrics"><Metric label="Fair odds" value={pick.fairOdds!=null?Number(pick.fairOdds).toFixed(2):'—'}/><Metric label="Best odds" value={pick.bestOdds!=null?Number(pick.bestOdds).toFixed(2):'—'}/><Metric label="Edge" value={pick.edgePct!=null?`${Number(pick.edgePct).toFixed(1)}%`:'—'}/><Metric label="EV" value={pick.expectedValuePct!=null?`${Number(pick.expectedValuePct).toFixed(1)}%`:'—'}/></div>}
     <EvidenceGrid evidence={pick.evidence??[]} id={pick.id}/>{pick.referee&&<div className="referee-line"><UserRoundCheck size={16}/><div><span>{pick.referee.name}</span><strong>{Number(pick.referee.cardsPerMatch??0).toFixed(1)} cards/match</strong></div></div>}<div className="quality-line"><span>Data quality</span><strong>{pick.dataQuality}%</strong></div></article>
 }
-function ExpandedCard({signal}:{signal:ExpandedSignal}){return <article className="pick-card expanded-card"><div className="pick-top"><div className="research-tag">OOS RESEARCH</div><div className={`grade grade-${signal.grade.replace('+','plus').toLowerCase()}`}>{signal.grade}</div></div><div className="league-line">{signal.country} · {signal.league} · {signal.kickoff}</div><h4>{signal.homeTeam} <span>vs</span> {signal.awayTeam}</h4><div className="selection"><BarChart3 size={17}/><span>{signal.selection}</span></div>
+function ExpandedCard({signal}:{signal:ExpandedSignal}){return <article className="pick-card expanded-card"><div className="pick-top"><div className="research-tag">OOS RESEARCH</div><div className={`grade grade-${signal.grade.replace('+','plus').toLowerCase()}`}>{signal.grade}</div></div><div className="league-line">{signal.country} · {signal.league}</div><div className="event-date">{eventDateLabel(signal.kickoffUtc,signal.kickoff)}</div><h4>{signal.homeTeam} <span>vs</span> {signal.awayTeam}</h4><div className="selection"><BarChart3 size={17}/><span>{signal.selection}</span></div>
   {signal.valueStatus&&<div className={`value-strip value-${signal.valueStatus}`}><div><CircleDollarSign size={16}/><strong>{valueLabel(signal.valueStatus)}</strong></div><span>{signal.bestOdds?`${signal.bestBookmaker??'Best price'} ${Number(signal.bestOdds).toFixed(2)}`:'No compatible price available yet'}</span></div>}
   <div className="context-badges inline-badges"><i className={signal.refereeConfirmed?'ok':''}>REF</i><i className={signal.lineupsConfirmed?'ok':''}>XI</i></div><div className="confidence-row"><span>EVE calibrated score</span><strong>{signal.confidence}%</strong></div><div className="meter"><i style={{width:`${signal.confidence}%`}}/></div>
   {(signal.fairOdds!=null||signal.bestOdds!=null)&&<div className="value-metrics"><Metric label="Fair odds" value={signal.fairOdds!=null?Number(signal.fairOdds).toFixed(2):'—'}/><Metric label="Best odds" value={signal.bestOdds!=null?Number(signal.bestOdds).toFixed(2):'—'}/><Metric label="Edge" value={signal.edgePct!=null?`${Number(signal.edgePct).toFixed(1)}%`:'—'}/><Metric label="EV" value={signal.expectedValuePct!=null?`${Number(signal.expectedValuePct).toFixed(1)}%`:'—'}/></div>}
@@ -367,6 +474,6 @@ function ExpandedCard({signal}:{signal:ExpandedSignal}){return <article classNam
 function EvidenceGrid({evidence,id}:{evidence:Evidence[];id:string}){return <div className="evidence-grid">{evidence.map((e)=><div className="evidence" key={`${id}-${e.key}`}><span>{e.label}</span><strong>{e.display}</strong><small>{e.score}/100 factor</small></div>)}</div>}
 function Metric({label,value}:{label:string;value:string}){return <div><span>{label}</span><strong>{value}</strong></div>}
 function PlayerTable({team,rows}:{team:string;rows:PlayerOutlook[]}){return <div className="player-table-wrap"><h4>{team}</h4><div className="player-table"><div className="player-row player-head"><span>Player</span><span>Matches</span><span>Shots</span><span>SOT</span><span>Goals</span><span>Cards</span></div>{rows.map((p)=><div className="player-row" key={p.playerId}><span><strong>{p.name}</strong><small>{p.position??'—'}</small></span><span>{p.matchesSample??0}</span><span>{p.avgShots??'—'}</span><span>{p.avgShotsOnTarget??'—'}</span><span>{p.avgGoals??'—'}</span><span>{p.avgYellowCards??'—'}</span></div>)}</div></div>}
-function ComboCard({combo}:{combo:Combo}){return <article className="combo-card"><div className="league-line">{combo.country} · {combo.league} · {new Date(combo.kickoff).toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</div><h4>{combo.homeTeam} <span>vs</span> {combo.awayTeam}</h4><div className="combo-sample">Comparable home/away sample: <strong>{combo.sampleSize}</strong> · Data quality <strong>{combo.dataQuality}%</strong></div><h5>Single legs</h5>{combo.singles?.map((s,i)=><div className="prob-row" key={i}><span>{s.selection}</span><strong>{s.probability}%</strong></div>)}<h5>Two-leg combinations</h5>{combo.doubles?.map((d,i)=><div className="prob-row" key={i}><span>{d.legs.join(' + ')}</span><strong>{d.probability}%</strong></div>)}{combo.treble&&<><h5>All three</h5><div className="prob-row treble"><span>{combo.treble.legs.join(' + ')}</span><strong>{combo.treble.probability}%</strong></div></>}<p>{combo.explanation}</p></article>}
+function ComboCard({combo}:{combo:Combo}){return <article className="combo-card"><div className="league-line">{combo.country} · {combo.league}</div><div className="event-date">{eventDateLabel(combo.kickoff)}</div><h4>{combo.homeTeam} <span>vs</span> {combo.awayTeam}</h4><div className="combo-sample">Comparable home/away sample: <strong>{combo.sampleSize}</strong> · Data quality <strong>{combo.dataQuality}%</strong></div><h5>Single legs</h5>{combo.singles?.map((s,i)=><div className="prob-row" key={i}><span>{s.selection}</span><strong>{s.probability}%</strong></div>)}<h5>Two-leg combinations</h5>{combo.doubles?.map((d,i)=><div className="prob-row" key={i}><span>{d.legs.join(' + ')}</span><strong>{d.probability}%</strong></div>)}{combo.treble&&<><h5>All three</h5><div className="prob-row treble"><span>{combo.treble.legs.join(' + ')}</span><strong>{combo.treble.probability}%</strong></div></>}<p>{combo.explanation}</p></article>}
 
 export default App
