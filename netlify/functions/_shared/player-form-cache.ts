@@ -23,7 +23,7 @@ function num(v:any){ const n=Number(typeof v==='object'&&v?(v.value??v.stat??v.t
 function text(v:any):string{
   if(v==null) return ''
   if(typeof v==='string'||typeof v==='number') return String(v).trim()
-  if(typeof v==='object') return String(v.fullName??v.text??v.name??[v.firstName,v.lastName].filter(Boolean).join(' ')??'').trim()
+  if(typeof v==='object') return String(v.fullName??v.text??v.name??v.label??v.type??v.color??[v.firstName,v.lastName].filter(Boolean).join(' ')??'').trim()
   return ''
 }
 function flatten(v:any):any[]{
@@ -62,7 +62,7 @@ async function fetchJson(urls:string[]){
   let last='FotMob request failed'
   for(const url of urls){
     try{
-      const response=await fetch(url,{headers:{accept:'application/json,text/plain,*/*','user-agent':'Mozilla/5.0 EVE-Football-Scanner/0.8 player-form'}})
+      const response=await fetch(url,{headers:{accept:'application/json,text/plain,*/*','user-agent':'Mozilla/5.0 EVE-Football-Scanner/0.9 player-form-cards'}})
       if(!response.ok){ last=`${response.status} ${response.statusText}`; if(response.status===429) await sleep(1400); continue }
       const body=await response.json()
       if(body&&typeof body==='object') return body
@@ -135,13 +135,30 @@ function allEvents(payload:any){
   const b=Array.isArray(payload?.content?.matchFacts?.events?.events)?payload.content.matchFacts.events.events:[]
   return [...a,...b]
 }
-function eventCount(events:any[],playerId:string,typeWords:string[]){
+function eventPlayerMatches(event:any,playerId:string,playerName:string){
+  const ids=[
+    event?.player?.id,event?.playerId,event?.player?.playerId,event?.person?.id,
+    event?.card?.playerId,event?.card?.player?.id,event?.eventPlayer?.id,
+  ].map(text).filter(Boolean)
+  if(playerId&&ids.includes(playerId)) return true
+  const wanted=clean(playerName)
+  if(!wanted) return false
+  const names=[event?.player?.name,event?.playerName,event?.person?.name,event?.card?.player?.name,event?.eventPlayer?.name].map(text).map(clean).filter(Boolean)
+  return names.includes(wanted)
+}
+function eventDescriptor(event:any){
+  return key([
+    event?.type,event?.eventType,event?.card,event?.cardType,event?.cardColor,
+    event?.card?.type,event?.card?.color,event?.card?.name,event?.card?.label,
+    event?.reason,event?.description,
+  ].map(text).filter(Boolean).join(' '))
+}
+function eventCount(events:any[],playerId:string,playerName:string,typeWords:string[]){
   const wanted=typeWords.map(key)
-  return events.filter((e)=>{
-    const pid=text(e?.player?.id??e?.playerId??e?.player?.playerId)
-    if(pid!==playerId) return false
-    const type=key(e?.type??e?.eventType??e?.card??'')
-    return wanted.some((w)=>type.includes(w))
+  return events.filter((event)=>{
+    if(!eventPlayerMatches(event,playerId,playerName)) return false
+    const descriptor=eventDescriptor(event)
+    return wanted.some((word)=>descriptor.includes(word))
   }).length
 }
 
@@ -160,7 +177,7 @@ function statFromDetail(payload:any,sourcePlayerId:string,playerName:string,matc
   const shotmap=Array.isArray(payload?.content?.shotmap?.shots)?payload.content.shotmap.shots:[]
   const playerShots=shotmap.filter((s:any)=>text(s?.playerId??s?.player?.id)===sourcePlayerId)
   const events=allEvents(payload)
-  const rowEvidence=item!=null||playerShots.length>0||events.some((e:any)=>text(e?.player?.id??e?.playerId)===sourcePlayerId)
+  const rowEvidence=item!=null||playerShots.length>0||events.some((event:any)=>eventPlayerMatches(event,sourcePlayerId,playerName))
   if(!rowEvidence) return null
   const shots=playerShots.length||findStat(p,['shots','total shots','shot attempts'])||findStat(item,['shots','total shots'])||0
   const sotMap=playerShots.filter((s:any)=>Boolean(s?.isOnTarget)||['goal','attemptsaved','saved'].some((w)=>key(s?.eventType??s?.type).includes(w))).length
@@ -170,10 +187,10 @@ function statFromDetail(payload:any,sourcePlayerId:string,playerName:string,matc
     minutes:num(p?.minutesPlayed??item?.minutesPlayed)??findStat(p,['minutes played','minutes','mins'])??findStat(item,['minutes played','minutes']),
     shots,
     shotsOnTarget,
-    goals:eventCount(events,sourcePlayerId,['goal'])||findStat(p,['goals','goal'])||0,
+    goals:eventCount(events,sourcePlayerId,playerName,['goal'])||findStat(p,['goals','goal'])||0,
     assists:findStat(p,['assists','assist'])??findStat(item,['assists'])??0,
-    yellowCards:eventCount(events,sourcePlayerId,['yellowcard','yellow'])||findStat(p,['yellow cards','yellowcards'])||0,
-    redCards:eventCount(events,sourcePlayerId,['redcard','red'])||findStat(p,['red cards','redcards'])||0,
+    yellowCards:eventCount(events,sourcePlayerId,playerName,['yellowcard','yellow'])||findStat(p,['yellow card','yellow cards','yellowcard','yellowcards','booking','bookings'])||findStat(item,['yellow card','yellow cards','yellowcard','yellowcards','booking','bookings'])||0,
+    redCards:eventCount(events,sourcePlayerId,playerName,['redcard','red'])||findStat(p,['red card','red cards','redcard','redcards'])||findStat(item,['red card','red cards','redcard','redcards'])||0,
     foulsCommitted:findStat(p,['fouls committed','fouls'])??findStat(item,['fouls committed']),
     foulsWon:findStat(p,['fouls won','was fouled'])??findStat(item,['fouls won']),
     xg:findStat(p,['expected goals','xg'])??findStat(item,['expected goals','xg']),
@@ -187,7 +204,7 @@ function statFromMatchRow(row:any,matchId:string):MatchStat|null{
   const sot=findStat(row,['shots on target','shotsontarget','ontarget'])
   const goals=findStat(row,['goals','goal'])
   const assists=findStat(row,['assists','assist'])
-  const cards=findStat(row,['yellow cards','yellowcards'])
+  const cards=findStat(row,['yellow card','yellow cards','yellowcard','yellowcards','booking','bookings'])
   const hasAppearanceEvidence=minutes!=null||shots!=null||sot!=null||goals!=null||assists!=null||cards!=null||num(row?.rating)!=null||num(row?.minutes)!=null
   if(!hasAppearanceEvidence) return null
   return {
@@ -198,7 +215,7 @@ function statFromMatchRow(row:any,matchId:string):MatchStat|null{
     goals:goals??0,
     assists:assists??0,
     yellowCards:cards??0,
-    redCards:findStat(row,['red cards','redcards'])??0,
+    redCards:findStat(row,['red card','red cards','redcard','redcards'])??0,
     foulsCommitted:findStat(row,['fouls committed','fouls']),
     foulsWon:findStat(row,['fouls won','was fouled']),
     xg:findStat(row,['expected goals','xg']),
@@ -210,7 +227,6 @@ export async function loadConfirmedStarterFormCache(supabase:Supabase,fixtureId:
   const {data:fixture,error:fixtureError}=await supabase.from('fixtures').select('id,kickoff,home_team_id,away_team_id').eq('id',fixtureId).maybeSingle()
   if(fixtureError||!fixture) throw new Error(fixtureError?.message??'Fixture not found')
 
-  // Graceful pre-SQL behavior: the rest of the enrichment pipeline can still run.
   const probe=await supabase.from('fixture_player_form_cache').select('fixture_id').eq('fixture_id',fixtureId).limit(1)
   if(probe.error){
     const message=probe.error.message??''
@@ -291,7 +307,7 @@ export async function loadConfirmedStarterFormCache(supabase:Supabase,fixtureId:
       }
       const {error}=await supabase.from('fixture_player_form_cache').upsert(cacheRow,{onConflict:'fixture_id,player_id'})
       if(error) throw error
-      summaries.push({playerId:player.id,name:player.name,sample:stats.length,status:stats.length>=5?'usable':'thin'})
+      summaries.push({playerId:player.id,name:player.name,sample:stats.length,status:stats.length>=5?'usable':'thin',yellowCards:cacheRow.avg_yellow_cards})
     }catch(error){
       warnings.push(`${player.name}: ${error instanceof Error?error.message:String(error)}`)
       summaries.push({playerId:player.id,name:player.name,sample:0,status:'error'})
