@@ -1,10 +1,30 @@
 import { createClient } from '@supabase/supabase-js'
-import { reconcileActiveReferees } from './_shared/referee-reconcile'
+import { reconcileFixtureReferee } from './_shared/referee-reconcile'
 
 function env(name:string){const value=process.env[name];if(!value) throw new Error(`Missing required environment variable: ${name}`);return value}
 
-export default async()=>{
+export default async(request:Request)=>{
   const supabase=createClient(env('SUPABASE_URL'),env('SUPABASE_SERVICE_ROLE_KEY'),{auth:{persistSession:false,autoRefreshToken:false}})
-  const result=await reconcileActiveReferees(supabase)
-  return new Response(JSON.stringify({ok:true,...result}),{headers:{'content-type':'application/json','cache-control':'no-store'}})
+  const url=new URL(request.url)
+  let fixtureId=url.searchParams.get('fixture_id')
+  if(!fixtureId){
+    const now=new Date()
+    const from=new Date(now.getTime()-180*60000).toISOString()
+    const to=new Date(now.getTime()+6*3600000).toISOString()
+    const {data:fixtures,error}=await supabase.from('fixtures').select('id,kickoff').in('status',['scheduled','live']).gte('kickoff',from).lte('kickoff',to).order('kickoff',{ascending:true}).limit(12)
+    if(error) return new Response(JSON.stringify({ok:false,error:error.message}),{status:500,headers:{'content-type':'application/json'}})
+    const ids=(fixtures??[]).map((f:any)=>f.id)
+    if(ids.length){
+      const {data:contexts}=await supabase.from('manual_match_context').select('fixture_id,referee_name,referee_confirmed').in('fixture_id',ids)
+      const confirmed=new Set((contexts??[]).filter((c:any)=>c.referee_confirmed&&c.referee_name).map((c:any)=>c.fixture_id))
+      fixtureId=(fixtures??[]).find((f:any)=>confirmed.has(f.id))?.id??null
+    }
+  }
+  if(!fixtureId) return new Response(JSON.stringify({ok:true,matched:false,note:'No active fixture with a confirmed referee is currently available to reconcile.'}),{headers:{'content-type':'application/json','cache-control':'no-store'}})
+  try{
+    const result=await reconcileFixtureReferee(supabase,fixtureId)
+    return new Response(JSON.stringify({ok:true,...result}),{headers:{'content-type':'application/json','cache-control':'no-store'}})
+  }catch(error){
+    return new Response(JSON.stringify({ok:false,fixtureId,error:error instanceof Error?error.message:String(error)}),{status:500,headers:{'content-type':'application/json','cache-control':'no-store'}})
+  }
 }
