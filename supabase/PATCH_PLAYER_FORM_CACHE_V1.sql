@@ -53,6 +53,10 @@ end $$;
 
 grant select on public.fixture_player_form_cache to anon, authenticated;
 
+-- The UI can still show the real sample count at 0-4 matches, but the averages
+-- remain NULL until at least five appearances exist. This makes "thin history"
+-- visibly different from a genuine zero and prevents the existing XI model from
+-- treating a one-match sample as reliable player intelligence.
 create or replace view public.fixture_player_outlook
 with (security_invoker = true)
 as
@@ -65,11 +69,16 @@ select
   coalesce(fl.position,p.position) as position,
   fl.is_starting as "isStarting",
   greatest(coalesce(form.matches,0),coalesce(cache.matches_sample,0)) as "matchesSample",
-  case when coalesce(cache.matches_sample,0) > coalesce(form.matches,0) then cache.avg_minutes else form.avg_minutes end as "avgMinutes",
-  case when coalesce(cache.matches_sample,0) > coalesce(form.matches,0) then cache.avg_shots else form.avg_shots end as "avgShots",
-  case when coalesce(cache.matches_sample,0) > coalesce(form.matches,0) then cache.avg_shots_on_target else form.avg_sot end as "avgShotsOnTarget",
-  case when coalesce(cache.matches_sample,0) > coalesce(form.matches,0) then cache.avg_goals else form.avg_goals end as "avgGoals",
-  case when coalesce(cache.matches_sample,0) > coalesce(form.matches,0) then cache.avg_yellow_cards else form.avg_cards end as "avgYellowCards"
+  case when greatest(coalesce(form.matches,0),coalesce(cache.matches_sample,0)) < 5 then null
+       when coalesce(cache.matches_sample,0) > coalesce(form.matches,0) then cache.avg_minutes else form.avg_minutes end as "avgMinutes",
+  case when greatest(coalesce(form.matches,0),coalesce(cache.matches_sample,0)) < 5 then null
+       when coalesce(cache.matches_sample,0) > coalesce(form.matches,0) then cache.avg_shots else form.avg_shots end as "avgShots",
+  case when greatest(coalesce(form.matches,0),coalesce(cache.matches_sample,0)) < 5 then null
+       when coalesce(cache.matches_sample,0) > coalesce(form.matches,0) then cache.avg_shots_on_target else form.avg_sot end as "avgShotsOnTarget",
+  case when greatest(coalesce(form.matches,0),coalesce(cache.matches_sample,0)) < 5 then null
+       when coalesce(cache.matches_sample,0) > coalesce(form.matches,0) then cache.avg_goals else form.avg_goals end as "avgGoals",
+  case when greatest(coalesce(form.matches,0),coalesce(cache.matches_sample,0)) < 5 then null
+       when coalesce(cache.matches_sample,0) > coalesce(form.matches,0) then cache.avg_yellow_cards else form.avg_cards end as "avgYellowCards"
 from public.fixture_lineups fl
 join public.fixtures current_fixture on current_fixture.id = fl.fixture_id
 join public.players p on p.id = fl.player_id
