@@ -95,6 +95,20 @@ function extractStartingXIs(payload:any,fixture:Fixture){
   return {home:[] as Starter[],away:[] as Starter[]}
 }
 
+function starterSignature(starters:Starter[]){
+  return starters.map((p)=>clean(p.name)).filter(Boolean).sort().join('|')
+}
+
+async function existingOfficialSignatures(supabase:ReturnType<typeof createClient>,fixture:Fixture){
+  const {data:rows,error}=await supabase.from('fixture_lineups').select('team_id,player_id').eq('fixture_id',fixture.id).eq('source','fotmob').eq('is_starting',true)
+  if(error||!rows?.length) return {home:'',away:''}
+  const ids=[...new Set(rows.map((r:any)=>r.player_id))]
+  const {data:players}=await supabase.from('players').select('id,name').in('id',ids)
+  const names=new Map((players??[]).map((p:any)=>[p.id,clean(p.name)]))
+  const teamSignature=(teamId:string)=>rows.filter((r:any)=>r.team_id===teamId).map((r:any)=>names.get(r.player_id)??'').filter(Boolean).sort().join('|')
+  return {home:teamSignature(fixture.home_team_id),away:teamSignature(fixture.away_team_id)}
+}
+
 async function importOfficialLineups(supabase:ReturnType<typeof createClient>,fixture:Fixture,home:Starter[],away:Starter[]){
   if(home.length!==11||away.length!==11) return {imported:false,home:home.length,away:away.length}
   const rows:any[]=[]
@@ -188,11 +202,6 @@ export default async(request?:Request)=>{
     for(const fixtureRaw of fixtures??[]){
       const fixture=fixtureRaw as Fixture
       const previous=contextMap.get(fixture.id)??{}
-      // Once both pieces are confirmed there is nothing useful to poll again.
-      if(previous.referee_confirmed&&previous.lineups_confirmed){
-        results.push({fixtureId:fixture.id,kickoff:fixture.kickoff,status:'already_confirmed'})
-        continue
-      }
 
       try{
         const payload=await fetchDetails(String(fixture.source_fixture_id))
@@ -200,12 +209,17 @@ export default async(request?:Request)=>{
         const lineups=extractStartingXIs(payload,fixture)
         const fullLineups=lineups.home.length===11&&lineups.away.length===11
         const refChanged=Boolean(refName)&&(!previous.referee_confirmed||clean(String(previous.referee_name??''))!==clean(refName))
-        const lineupChanged=fullLineups&&!previous.lineups_confirmed
 
-        if(refName){ await importReferee(supabase,fixture.id,refName); refsImported+=refChanged?1:0 }
+        let lineupChanged=false
         if(fullLineups){
+          const existing=await existingOfficialSignatures(supabase,fixture)
+          lineupChanged=!previous.lineups_confirmed||existing.home!==starterSignature(lineups.home)||existing.away!==starterSignature(lineups.away)
+        }
+
+        if(refName&&refChanged){ await importReferee(supabase,fixture.id,refName); refsImported+=1 }
+        if(fullLineups&&lineupChanged){
           const imported=await importOfficialLineups(supabase,fixture,lineups.home,lineups.away)
-          if(imported.imported&&lineupChanged) lineupsImported+=1
+          if(imported.imported) lineupsImported+=1
         }
 
         if(refChanged||lineupChanged){
@@ -229,7 +243,7 @@ export default async(request?:Request)=>{
           homeStarters:lineups.home.length,
           awayStarters:lineups.away.length,
           changed:refChanged||lineupChanged,
-          status:fullLineups?'official_lineups_found':refName?'referee_found_waiting_lineups':'awaiting_matchday_data',
+          status:fullLineups?(lineupChanged?'official_lineups_updated':'official_lineups_confirmed'):refName?'referee_found_waiting_lineups':'awaiting_matchday_data',
         })
       }catch(error){
         results.push({fixtureId:fixture.id,kickoff:fixture.kickoff,status:'error',error:error instanceof Error?error.message:String(error)})
@@ -240,7 +254,7 @@ export default async(request?:Request)=>{
     const errors=results.filter((r)=>r.status==='error').length
     const summary={fixturesChecked:fixtures?.length??0,changed,lineupsImported,refsImported,reanalysisTriggered,errors,lookaheadMinutes:LOOKAHEAD_MINUTES,results:results.slice(0,24)}
     if(run?.id) await supabase.from('source_sync_runs').update({status:errors?'partial':'success',rows_upserted:lineupsImported*22+refsImported,finished_at:new Date().toISOString(),error_message:JSON.stringify(summary).slice(0,5000)}).eq('id',run.id)
-    return new Response(JSON.stringify({ok:true,...summary,note:'EVE checks match details every 15 minutes inside roughly two hours of kickoff. Official referee and 11+11 starting XIs are imported automatically; confirmed changes trigger player-history enrichment and re-analysis.'}),{headers:{'content-type':'application/json'}})
+    return new Response(JSON.stringify({ok:true,...summary,note:'EVE checks match details every 15 minutes inside roughly two hours of kickoff. Official referee and 11+11 starting XIs are imported automatically; late XI/referee changes are detected and trigger another re-analysis.'}),{headers:{'content-type':'application/json'}})
   }catch(error){
     if(run?.id) await supabase.from('source_sync_runs').update({status:'failed',finished_at:new Date().toISOString(),error_message:error instanceof Error?error.message:String(error)}).eq('id',run.id)
     return new Response(JSON.stringify({ok:false,error:error instanceof Error?error.message:String(error)}),{status:500,headers:{'content-type':'application/json'}})
