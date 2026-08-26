@@ -24,9 +24,23 @@ function flatten(value:any):any[]{
   for(const item of value){ if(Array.isArray(item)) out.push(...flatten(item)); else if(item!=null) out.push(item) }
   return out
 }
+function refereeSimilarity(a:string,b:string){
+  const aa=clean(a),bb=clean(b)
+  if(!aa||!bb) return 0
+  if(aa===bb) return 1
+  const at=aa.split(' ').filter(Boolean),bt=bb.split(' ').filter(Boolean)
+  const aset=new Set(at),bset=new Set(bt)
+  const common=[...aset].filter((token)=>bset.has(token)).length
+  const overlap=common/Math.max(at.length,bt.length,1)
+  const firstInitial=(at[0]?.[0]&&bt[0]?.[0]&&at[0][0]===bt[0][0])?1:0
+  const lastSame=at.at(-1)===bt.at(-1)?1:0
+  const penultimateSame=at.length>1&&bt.length>1&&at.at(-2)===bt.at(-2)?1:0
+  const includes=aa.includes(bb)||bb.includes(aa)?1:0
+  return Math.min(1,overlap*.58+lastSame*.18+penultimateSame*.12+firstInitial*.08+includes*.08)
+}
 
 type Starter={sourcePlayerId:string;name:string;position:string|null;shirtNumber:number|null}
-type Fixture={id:string;source_fixture_id:string;kickoff:string;home_team_id:string;away_team_id:string;match_context:any}
+type Fixture={id:string;source_fixture_id:string;kickoff:string;home_team_id:string;away_team_id:string;referee_id:string|null;match_context:any}
 
 async function fetchDetails(matchId:string){
   const urls=[
@@ -36,7 +50,7 @@ async function fetchDetails(matchId:string){
   let last='FotMob match details failed'
   for(const url of urls){
     try{
-      const response=await fetch(url,{headers:{accept:'application/json,text/plain,*/*','user-agent':'Mozilla/5.0 EVE-Football-Scanner/0.7 matchday-auto'}})
+      const response=await fetch(url,{headers:{accept:'application/json,text/plain,*/*','user-agent':'Mozilla/5.0 EVE-Football-Scanner/0.8 matchday-auto-ref'}})
       if(!response.ok){ last=`${response.status} ${response.statusText}`; if(response.status===429) await sleep(1200); continue }
       const body=await response.json()
       if(body&&typeof body==='object') return body
@@ -60,21 +74,13 @@ function starterFrom(item:any):Starter|null{
   const rawId=text(p?.id??p?.playerId??item?.id)
   const localized=p?.localizedPosition??item?.localizedPosition
   const position=text(p?.positionStringShort??p?.positionString??p?.position??localized?.label??localized?.text??item?.position) || null
-  return {
-    sourcePlayerId:rawId,
-    name,
-    position,
-    shirtNumber:num(p?.shirtNumber??p?.shirt??item?.shirtNumber??item?.shirt),
-  }
+  return {sourcePlayerId:rawId,name,position,shirtNumber:num(p?.shirtNumber??p?.shirt??item?.shirtNumber??item?.shirt)}
 }
 
 function currentSchemaGroups(payload:any){
   const groups=payload?.content?.lineup?.lineup
   if(!Array.isArray(groups)) return [] as Array<{teamId:string;players:any[]}>
-  return groups.map((group:any)=>({
-    teamId:text(group?.teamId??group?.team?.id),
-    players:flatten(group?.players??group?.optaLineup?.players),
-  }))
+  return groups.map((group:any)=>({teamId:text(group?.teamId??group?.team?.id),players:flatten(group?.players??group?.optaLineup?.players)}))
 }
 
 function legacyGroups(payload:any){
@@ -90,7 +96,6 @@ function extractStartingXIs(payload:any,fixture:Fixture){
     const away=flatten(line.awayTeam.starters).map(starterFrom).filter(Boolean) as Starter[]
     if(home.length>=11&&away.length>=11) return {home:home.slice(0,11),away:away.slice(0,11),schema:'homeTeam/awayTeam'}
   }
-
   const groups=[...currentSchemaGroups(payload),...legacyGroups(payload)]
   if(groups.length){
     const homeFotmob=text(fixture.match_context?.fotmob_home_team_id)
@@ -105,7 +110,6 @@ function extractStartingXIs(payload:any,fixture:Fixture){
     const away=byTeam.get(awayFotmob)??[]
     if(home.length>=11&&away.length>=11) return {home:home.slice(0,11),away:away.slice(0,11),schema:'lineup array'}
   }
-
   return {home:[] as Starter[],away:[] as Starter[],schema:'none'}
 }
 
@@ -139,14 +143,47 @@ async function importOfficialLineups(supabase:ReturnType<typeof createClient>,fi
   return true
 }
 
-async function importReferee(supabase:ReturnType<typeof createClient>,fixtureId:string,name:string){
-  if(!name) return false
-  const sourceKey=`fotmob-ref:${slug(name)}`
-  const {data:ref,error}=await supabase.from('referees').upsert({source_key:sourceKey,name},{onConflict:'source_key'}).select('id').single()
-  if(error||!ref?.id) throw new Error(error?.message??'Referee upsert failed')
-  const {error:updateError}=await supabase.from('fixtures').update({referee_id:ref.id,updated_at:new Date().toISOString()}).eq('id',fixtureId)
-  if(updateError) throw updateError
-  return true
+async function importReferee(supabase:ReturnType<typeof createClient>,fixture:Fixture,name:string){
+  if(!name) return {fixtureChanged:false,profileMatched:false,refereeId:fixture.referee_id,storedName:null as string|null,profileSample:0}
+  const {data:refs,error:refsError}=await supabase.from('referees').select('id,name,source_key')
+  if(refsError) throw refsError
+  const ids=(refs??[]).map((r:any)=>r.id)
+  const {data:profiles,error:profilesError}=ids.length?await supabase.from('referee_profiles').select('referee_id,matches_sample,as_of_date').in('referee_id',ids):{data:[] as any[],error:null}
+  if(profilesError) throw profilesError
+  const latestProfile=new Map<string,{matches:number;date:string}>()
+  for(const row of profiles??[]){
+    const prev=latestProfile.get(row.referee_id)
+    const date=String(row.as_of_date??'')
+    if(!prev||date>prev.date) latestProfile.set(row.referee_id,{matches:Number(row.matches_sample??0),date})
+  }
+  let best:any=null
+  let bestNameScore=0
+  let bestWeighted=0
+  for(const ref of refs??[]){
+    const nameScore=refereeSimilarity(name,String(ref.name??''))
+    if(nameScore<0.72) continue
+    const profile=latestProfile.get(ref.id)
+    const profileBonus=profile?.matches?Math.min(.16,.06+profile.matches/250):0
+    const historicalBonus=String(ref.source_key??'').startsWith('football-data:')?.025:0
+    const weighted=nameScore+profileBonus+historicalBonus
+    if(weighted>bestWeighted){ best=ref;bestNameScore=nameScore;bestWeighted=weighted }
+  }
+
+  let chosen=bestNameScore>=0.82?best:null
+  if(!chosen){
+    const sourceKey=`fotmob-ref:${slug(name)}`
+    const {data:ref,error}=await supabase.from('referees').upsert({source_key:sourceKey,name},{onConflict:'source_key'}).select('id,name,source_key').single()
+    if(error||!ref?.id) throw new Error(error?.message??'Referee upsert failed')
+    chosen=ref
+  }
+  const profile=latestProfile.get(chosen.id)
+  const fixtureChanged=fixture.referee_id!==chosen.id
+  if(fixtureChanged){
+    const {error:updateError}=await supabase.from('fixtures').update({referee_id:chosen.id,updated_at:new Date().toISOString()}).eq('id',fixture.id)
+    if(updateError) throw updateError
+    fixture.referee_id=chosen.id
+  }
+  return {fixtureChanged,profileMatched:Boolean(profile?.matches),refereeId:chosen.id as string,storedName:String(chosen.name??name),profileSample:Number(profile?.matches??0)}
 }
 
 async function triggerReanalysis(request:Request|undefined,fixtureId:string){
@@ -170,7 +207,7 @@ export default async(request?:Request)=>{
 
   try{
     let query=supabase.from('fixtures')
-      .select('id,source_fixture_id,kickoff,home_team_id,away_team_id,match_context')
+      .select('id,source_fixture_id,kickoff,home_team_id,away_team_id,referee_id,match_context')
       .eq('source','fotmob')
       .in('status',['scheduled','live'])
       .order('kickoff',{ascending:true})
@@ -198,23 +235,24 @@ export default async(request?:Request)=>{
         const lineups=extractStartingXIs(payload,fixture)
         const fullLineups=lineups.home.length===11&&lineups.away.length===11
         const refChanged=Boolean(refName)&&(!previous.referee_confirmed||clean(text(previous.referee_name))!==clean(refName))
+        const refResolution=refName?await importReferee(supabase,fixture,refName):{fixtureChanged:false,profileMatched:false,refereeId:fixture.referee_id,storedName:null,profileSample:0}
+        if(refResolution.fixtureChanged) refsImported+=1
         let lineupChanged=false
         if(fullLineups){
           const existing=await existingOfficialSignatures(supabase,fixture)
           lineupChanged=!previous.lineups_confirmed||existing.home!==starterSignature(lineups.home)||existing.away!==starterSignature(lineups.away)
         }
-
-        if(refName&&refChanged){ if(await importReferee(supabase,fixture.id,refName)) refsImported+=1 }
         if(fullLineups&&lineupChanged){ if(await importOfficialLineups(supabase,fixture,lineups.home,lineups.away)) lineupsImported+=1 }
 
-        if(refChanged||lineupChanged){
+        const materialChanged=refChanged||refResolution.fixtureChanged||lineupChanged
+        if(materialChanged){
           changed+=1
           const {error:contextError}=await supabase.from('manual_match_context').upsert({fixture_id:fixture.id,referee_name:refName||previous.referee_name||null,referee_confirmed:Boolean(refName)||Boolean(previous.referee_confirmed),lineups_confirmed:fullLineups||Boolean(previous.lineups_confirmed),confirmed_at:new Date().toISOString(),updated_at:new Date().toISOString()},{onConflict:'fixture_id'})
           if(contextError) throw contextError
           if(await triggerReanalysis(request,fixture.id)) reanalysisTriggered+=1
         }
 
-        results.push({fixtureId:fixture.id,kickoff:fixture.kickoff,referee:refName||null,homeStarters:lineups.home.length,awayStarters:lineups.away.length,schema:lineups.schema,changed:refChanged||lineupChanged,status:fullLineups?(lineupChanged?'official_lineups_updated':'official_lineups_confirmed'):refName?'referee_found_waiting_lineups':'awaiting_matchday_data'})
+        results.push({fixtureId:fixture.id,kickoff:fixture.kickoff,referee:refName||null,refereeStoredAs:refResolution.storedName,refereeProfileMatched:refResolution.profileMatched,refereeProfileSample:refResolution.profileSample,homeStarters:lineups.home.length,awayStarters:lineups.away.length,schema:lineups.schema,changed:materialChanged,status:fullLineups?(lineupChanged?'official_lineups_updated':'official_lineups_confirmed'):refName?'referee_found_waiting_lineups':'awaiting_matchday_data'})
       }catch(error){ results.push({fixtureId:fixture.id,kickoff:fixture.kickoff,status:'error',error:error instanceof Error?error.message:String(error)}) }
       await sleep(130)
     }
@@ -222,7 +260,7 @@ export default async(request?:Request)=>{
     const errors=results.filter((r)=>r.status==='error').length
     const summary={fixturesChecked:fixtures?.length??0,changed,lineupsImported,refsImported,reanalysisTriggered,errors,lookaheadMinutes:LOOKAHEAD_MINUTES,lookbackMinutes:LOOKBACK_MINUTES,results:results.slice(0,24)}
     if(run?.id) await supabase.from('source_sync_runs').update({status:errors?'partial':'success',rows_upserted:lineupsImported*22+refsImported,finished_at:new Date().toISOString(),error_message:JSON.stringify(summary).slice(0,5000)}).eq('id',run.id)
-    return new Response(JSON.stringify({ok:true,...summary,note:'Current FotMob lineup schema is supported. EVE checks every 15 minutes before kickoff and continues through the live-match window so official XI/referee data cannot be missed just because kickoff has passed.'}),{headers:{'content-type':'application/json'}})
+    return new Response(JSON.stringify({ok:true,...summary,note:'Official XI/referee data is checked every 15 minutes. Confirmed referees are reconciled to EVE historical referee identities when possible so their rolling card/foul profile can be used immediately.'}),{headers:{'content-type':'application/json'}})
   }catch(error){
     if(run?.id) await supabase.from('source_sync_runs').update({status:'failed',finished_at:new Date().toISOString(),error_message:error instanceof Error?error.message:String(error)}).eq('id',run.id)
     return new Response(JSON.stringify({ok:false,error:error instanceof Error?error.message:String(error)}),{status:500,headers:{'content-type':'application/json'}})
