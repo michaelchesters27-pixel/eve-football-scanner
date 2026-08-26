@@ -10,7 +10,7 @@ function sleep(ms:number){ return new Promise((r)=>setTimeout(r,ms)) }
 function text(v:any):string{
   if(v==null) return ''
   if(typeof v==='string'||typeof v==='number') return String(v).trim()
-  if(typeof v==='object') return String(v.fullName??v.text??v.name??[v.firstName,v.lastName].filter(Boolean).join(' ')??'').trim()
+  if(typeof v==='object') return String(v.fullName??v.text??v.name??v.label??v.type??v.color??[v.firstName,v.lastName].filter(Boolean).join(' ')??'').trim()
   return ''
 }
 function flatten(v:any):any[]{
@@ -41,7 +41,7 @@ async function fetchJson(urls:string[]){
   let last='FotMob request failed'
   for(const url of urls){
     try{
-      const r=await fetch(url,{headers:{accept:'application/json,text/plain,*/*','user-agent':'Mozilla/5.0 EVE-Football-Scanner/0.7'}})
+      const r=await fetch(url,{headers:{accept:'application/json,text/plain,*/*','user-agent':'Mozilla/5.0 EVE-Football-Scanner/0.9 player-history-cards'}})
       if(!r.ok){ last=`${r.status} ${r.statusText}`; if(r.status===429) await sleep(1500); continue }
       const body=await r.json(); if(body&&typeof body==='object') return body
       last='Unexpected FotMob payload'
@@ -100,14 +100,20 @@ function allEvents(payload:any){
   const b=Array.isArray(payload?.content?.matchFacts?.events?.events)?payload.content.matchFacts.events.events:[]
   return [...a,...b]
 }
-function eventCount(events:any[],playerId:string,typeWords:string[]){
+function eventPlayerMatches(event:any,playerId:string,playerName:string){
+  const ids=[event?.player?.id,event?.playerId,event?.player?.playerId,event?.person?.id,event?.card?.playerId,event?.card?.player?.id,event?.eventPlayer?.id].map(text).filter(Boolean)
+  if(playerId&&ids.includes(playerId)) return true
+  const wanted=clean(playerName)
+  if(!wanted) return false
+  const names=[event?.player?.name,event?.playerName,event?.person?.name,event?.card?.player?.name,event?.eventPlayer?.name].map(text).map(clean).filter(Boolean)
+  return names.includes(wanted)
+}
+function eventDescriptor(event:any){
+  return key([event?.type,event?.eventType,event?.card,event?.cardType,event?.cardColor,event?.card?.type,event?.card?.color,event?.card?.name,event?.card?.label,event?.reason,event?.description].map(text).filter(Boolean).join(' '))
+}
+function eventCount(events:any[],playerId:string,playerName:string,typeWords:string[]){
   const wanted=typeWords.map(key)
-  return events.filter((e)=>{
-    const pid=text(e?.player?.id??e?.playerId??e?.player?.playerId)
-    if(pid!==playerId) return false
-    const type=key(e?.type??e?.eventType??e?.card??'')
-    return wanted.some((w)=>type.includes(w))
-  }).length
+  return events.filter((event)=>eventPlayerMatches(event,playerId,playerName)&&wanted.some((word)=>eventDescriptor(event).includes(word))).length
 }
 
 function lineupGroups(payload:any){
@@ -181,10 +187,10 @@ async function upsertDetail(supabase:Supabase,dbFixture:any,payload:any,currentI
       const shots=playerShots.length||findStat(p,['shots','total shots','shot attempts'])||findStat(item,['shots','total shots'])||0
       const sotMap=playerShots.filter((s:any)=>Boolean(s?.isOnTarget)||['goal','attemptsaved','saved'].some((w)=>key(s?.eventType??s?.type).includes(w))).length
       const sot=sotMap||findStat(p,['shots on target','shotsontarget','ontarget'])||findStat(item,['shots on target','shotsontarget'])||0
-      const goals=eventCount(events,rawId,['goal'])||findStat(p,['goals','goal'])||0
+      const goals=eventCount(events,rawId,name,['goal'])||findStat(p,['goals','goal'])||0
       const assists=findStat(p,['assists','assist'])||findStat(item,['assists'])||0
-      const yellows=eventCount(events,rawId,['yellowcard','yellow'])||findStat(p,['yellow cards','yellowcards'])||0
-      const reds=eventCount(events,rawId,['redcard','red'])||findStat(p,['red cards','redcards'])||0
+      const yellows=eventCount(events,rawId,name,['yellowcard','yellow'])||findStat(p,['yellow card','yellow cards','yellowcard','yellowcards','booking','bookings'])||findStat(item,['yellow card','yellow cards','yellowcard','yellowcards','booking','bookings'])||0
+      const reds=eventCount(events,rawId,name,['redcard','red'])||findStat(p,['red card','red cards','redcard','redcards'])||findStat(item,['red card','red cards','redcard','redcards'])||0
       const minutes=num(p?.minutesPlayed??item?.minutesPlayed)??findStat(p,['minutes played','minutes','mins'])??findStat(item,['minutes played','minutes'])
       const foulsCommitted=findStat(p,['fouls committed','fouls'])??findStat(item,['fouls committed'])
       const foulsWon=findStat(p,['fouls won','was fouled'])??findStat(item,['fouls won'])
