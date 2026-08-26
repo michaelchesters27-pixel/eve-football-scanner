@@ -93,6 +93,26 @@ type SetupFixture = {
   awayStarters: number
 }
 
+type RefereeContext = {
+  ok: boolean
+  confirmed: boolean
+  name?: string | null
+  historicalIdentity?: string | null
+  profile?: {
+    matchesSample: number
+    yellowCardsPerMatch?: number | null
+    redCardsPerMatch?: number | null
+    foulsPerMatch?: number | null
+    penaltiesPerMatch?: number | null
+    homeYellowsPerMatch?: number | null
+    awayYellowsPerMatch?: number | null
+    asOfDate?: string | null
+  } | null
+  tendency?: { level: string; impact: string }
+  sampleLabel?: string
+  modelUse?: string
+}
+
 type PlayerOutlook = {
   fixtureId: string
   teamId: string
@@ -201,6 +221,10 @@ function eventDateLabel(value?: string | null, fallback = '') {
 function hoursUntil(value: string) {
   const date = parsedDate(value)
   return date ? (date.getTime() - Date.now()) / 3600000 : 999
+}
+
+function formatMaybe(value?: number | null, digits = 1) {
+  return value == null || !Number.isFinite(Number(value)) ? '—' : Number(value).toFixed(digits)
 }
 
 function App() {
@@ -324,6 +348,7 @@ function MatchSetupPage({ supabase }: { supabase:any }) {
   const [fixtures,setFixtures]=useState<SetupFixture[]>([])
   const [selectedId,setSelectedId]=useState('')
   const [referee,setReferee]=useState('')
+  const [refIntel,setRefIntel]=useState<RefereeContext|null>(null)
   const [homeText,setHomeText]=useState('')
   const [awayText,setAwayText]=useState('')
   const [players,setPlayers]=useState<PlayerOutlook[]>([])
@@ -352,6 +377,22 @@ function MatchSetupPage({ supabase }: { supabase:any }) {
   useEffect(()=>{
     setManualOpen(false)
     setNotice('')
+    setRefIntel(null)
+  },[selectedId])
+
+  useEffect(()=>{
+    if(!selectedId){setRefIntel(null);return}
+    let cancelled=false
+    const loadRef=async()=>{
+      try{
+        const response=await fetch(`/.netlify/functions/referee-context?fixture_id=${encodeURIComponent(selectedId)}`,{cache:'no-store'})
+        const result=await response.json()
+        if(!cancelled)setRefIntel(response.ok&&result.ok?result:null)
+      }catch{if(!cancelled)setRefIntel(null)}
+    }
+    void loadRef()
+    const timer=window.setInterval(()=>void loadRef(),60000)
+    return()=>{cancelled=true;window.clearInterval(timer)}
   },[selectedId])
 
   useEffect(()=>{
@@ -364,7 +405,7 @@ function MatchSetupPage({ supabase }: { supabase:any }) {
       const rows=(data??[]) as PlayerOutlook[]
       setPlayers(rows)
       if(!manualOpen&&current){
-        setReferee(current.referee??'')
+        setReferee(refIntel?.name??current.referee??'')
         const home=rows.filter((p)=>p.teamId===current.homeTeamId).map((p)=>p.name)
         const away=rows.filter((p)=>p.teamId===current.awayTeamId).map((p)=>p.name)
         setHomeText(home.join('\n'))
@@ -374,7 +415,7 @@ function MatchSetupPage({ supabase }: { supabase:any }) {
     void load()
     const timer=window.setInterval(()=>void load(),60000)
     return()=>{cancelled=true;window.clearInterval(timer)}
-  },[supabase,selectedId,fixtures,manualOpen])
+  },[supabase,selectedId,fixtures,manualOpen,refIntel?.name])
 
   const split=(text:string)=>text.split('\n').map((x)=>x.trim()).filter(Boolean)
   const confirm=async()=>{
@@ -393,21 +434,33 @@ function MatchSetupPage({ supabase }: { supabase:any }) {
 
   const setupStatus=selected?matchdayStatus(selected):'Select a fixture. EVE will import referee and official starting XIs automatically close to kickoff.'
   const homeCount=split(homeText).length,awayCount=split(awayText).length
-  const autoActive=selected?hoursUntil(selected.kickoff)<=2.25&&hoursUntil(selected.kickoff)>=-0.5:false
+  const autoActive=selected?hoursUntil(selected.kickoff)<=3&&hoursUntil(selected.kickoff)>=-2.5:false
+  const refProfile=refIntel?.profile
 
   return <>
-    <PageIntro eyebrow="MATCH-DAY AUTO CONFIRMATION" title="Referee + Starting XI intelligence" text="Manual typing is now the fallback. EVE automatically checks match-day data every 15 minutes inside roughly two hours of kickoff, imports the referee and official 11+11 starters, then re-runs the fixture." status={notice||setupStatus}/>
+    <PageIntro eyebrow="MATCH-DAY AUTO CONFIRMATION" title="Referee + Starting XI intelligence" text="Manual typing is now the fallback. EVE checks match-day data every 15 minutes, imports the referee and official 11+11 starters, links the referee to historical card/foul evidence where possible, then re-runs the fixture." status={notice||setupStatus}/>
     <section className="setup-card">
       <label>Fixture<select value={selectedId} onChange={(e)=>setSelectedId(e.target.value)}><option value="">Select fixture</option>{fixtures.map((f)=><option key={f.fixtureId} value={f.fixtureId}>{eventDateLabel(f.kickoff)} · {f.homeTeam} v {f.awayTeam}</option>)}</select></label>
       {selected&&<>
         <div className="fixture-heading"><div><span>{selected.country} · {selected.league}</span><strong>{selected.homeTeam} vs {selected.awayTeam}</strong><div className="event-date compact-date">{eventDateLabel(selected.kickoff)}</div></div><div className="context-badges"><i className={selected.refereeConfirmed?'ok':''}>REF {selected.refereeConfirmed?'CONFIRMED':'WAITING'}</i><i className={selected.lineupsConfirmed?'ok':''}>XI {selected.lineupsConfirmed?'CONFIRMED':'WAITING'}</i></div></div>
 
         <div className="matchday-status-panel">
-          <div className="matchday-row"><span>Referee</span><strong className={selected.refereeConfirmed?'confirmed-text':'waiting-text'}>{selected.refereeConfirmed?(selected.referee||'Confirmed'):'Awaiting referee confirmation'}</strong></div>
+          <div className="matchday-row"><span>Referee</span><strong className={selected.refereeConfirmed?'confirmed-text':'waiting-text'}>{selected.refereeConfirmed?(refIntel?.name??selected.referee??'Confirmed'):'Awaiting referee confirmation'}</strong></div>
           <div className="matchday-row"><span>Starting XIs</span><strong className={selected.lineupsConfirmed?'confirmed-text':'waiting-text'}>{selected.lineupsConfirmed?`CONFIRMED · ${selected.homeStarters} + ${selected.awayStarters} starters`:'AWAITING LINEUP CONFIRMATION'}</strong></div>
-          <div className="matchday-row"><span>Automatic checks</span><strong className={autoActive?'active-text':''}>{selected.refereeConfirmed&&selected.lineupsConfirmed?'MATCH-DAY DATA COMPLETE':autoActive?'ACTIVE · CHECKING EVERY 15 MINUTES':'STARTS ABOUT 2 HOURS BEFORE KICKOFF'}</strong></div>
+          <div className="matchday-row"><span>Automatic checks</span><strong className={autoActive?'active-text':''}>{selected.refereeConfirmed&&selected.lineupsConfirmed?'MATCH-DAY DATA COMPLETE':autoActive?'ACTIVE · CHECKING EVERY 15 MINUTES':'STARTS ABOUT 3 HOURS BEFORE KICKOFF'}</strong></div>
           <p>{selected.lineupsConfirmed?'Official starting teams have been imported and EVE has triggered the match-day re-analysis workflow.':'No action is required. EVE will keep the normal pre-match model running and wait for the official teams to be published. Lineups are commonly available around an hour before kickoff, but the scanner keeps checking because release times vary.'}</p>
         </div>
+
+        {selected.refereeConfirmed&&<div className="matchday-status-panel">
+          <div className="matchday-row"><span>Referee tendency</span><strong>{refIntel?.tendency?.level??'CHECKING HISTORY'}</strong></div>
+          <div className="matchday-row"><span>Historical sample</span><strong>{refProfile?`${refProfile.matchesSample} matches · ${refIntel?.sampleLabel??''}`:'Awaiting a usable historical profile'}</strong></div>
+          <div className="matchday-row"><span>Yellow cards</span><strong>{refProfile?`${formatMaybe(refProfile.yellowCardsPerMatch,2)} / match`:'—'}</strong></div>
+          <div className="matchday-row"><span>Red cards</span><strong>{refProfile?`${formatMaybe(refProfile.redCardsPerMatch,3)} / match`:'—'}</strong></div>
+          <div className="matchday-row"><span>Fouls</span><strong>{refProfile?`${formatMaybe(refProfile.foulsPerMatch,1)} / match`:'—'}</strong></div>
+          <div className="matchday-row"><span>Home / away yellows</span><strong>{refProfile?`${formatMaybe(refProfile.homeYellowsPerMatch,2)} / ${formatMaybe(refProfile.awayYellowsPerMatch,2)}`:'—'}</strong></div>
+          {refProfile?.penaltiesPerMatch!=null&&<div className="matchday-row"><span>Penalties</span><strong>{formatMaybe(refProfile.penaltiesPerMatch,3)} / match</strong></div>}
+          <p><strong>Card-model impact:</strong> {refIntel?.tendency?.impact??'EVE will keep referee influence neutral until enough historical evidence is linked.'}</p>
+        </div>}
 
         <button className="manual-toggle" onClick={()=>setManualOpen((v)=>!v)}>{manualOpen?'Hide manual override':'Manual override'}</button>
         {manualOpen&&<div className="manual-override">
@@ -429,8 +482,8 @@ function MatchSetupPage({ supabase }: { supabase:any }) {
 function matchdayStatus(fixture:SetupFixture){
   if(fixture.refereeConfirmed&&fixture.lineupsConfirmed)return'Match-day data confirmed — referee and both starting XIs are loaded.'
   const hours=hoursUntil(fixture.kickoff)
-  if(hours<=2.25&&hours>=-0.5)return fixture.lineupsConfirmed?'Starting XIs confirmed — automatic check remains active for referee updates.':'Awaiting lineup confirmation — automatic match-day checks are active.'
-  return 'Pre-match analysis ready — automatic referee/XI checks begin about 2 hours before kickoff.'
+  if(hours<=3&&hours>=-2.5)return fixture.lineupsConfirmed?'Starting XIs confirmed — automatic check remains active for referee updates.':'Awaiting lineup confirmation — automatic match-day checks are active.'
+  return 'Pre-match analysis ready — automatic referee/XI checks begin about 3 hours before kickoff.'
 }
 
 function ComboLabPage({supabase}:{supabase:any}){
