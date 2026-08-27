@@ -1,6 +1,6 @@
 -- EVE Football Scanner — RESULTS LOG V1
 -- Run once in the dedicated eve-football-scanner Supabase project.
--- Purpose: permanently remember every calibrated pick EVE actually publishes,
+-- Purpose: permanently remember every FINAL calibrated pick EVE actually publishes,
 -- settle it from completed match data, and expose a public results page with hit rate.
 
 create table if not exists public.scanner_pick_log (
@@ -31,7 +31,8 @@ exception when duplicate_object then null; end $$;
 
 grant select on public.scanner_pick_log to anon, authenticated;
 
--- Freeze the first version of a pick when the calibrated engine publishes it.
+-- Freeze the first FINAL calibrated version of a pick. Raw pre-calibration
+-- candidates are ignored because fair_probability is still null at that stage.
 -- If a later lineup/referee refresh suppresses it, the historical record is retained.
 create or replace function public.capture_scanner_pick()
 returns trigger
@@ -41,6 +42,7 @@ set search_path = public
 as $$
 begin
   if new.publish_status = 'published'
+     and new.fair_probability is not null
      and new.model_version in ('v0-research','v1-expanded-research') then
     insert into public.scanner_pick_log (
       prediction_id, fixture_id, model_version, source_page, market, selection,
@@ -66,10 +68,10 @@ $$;
 
 drop trigger if exists capture_scanner_pick_trigger on public.predictions;
 create trigger capture_scanner_pick_trigger
-after insert or update of publish_status on public.predictions
+after insert or update of publish_status, fair_probability on public.predictions
 for each row execute function public.capture_scanner_pick();
 
--- Backfill the picks that are already in the database from the first days of EVE.
+-- Backfill FINAL calibrated picks that are already stored from the first days of EVE.
 insert into public.scanner_pick_log (
   prediction_id, fixture_id, model_version, source_page, market, selection,
   confidence, grade, data_quality, fair_probability, first_published_at
@@ -88,6 +90,7 @@ select
   p.generated_at
 from public.predictions p
 where p.publish_status = 'published'
+  and p.fair_probability is not null
   and p.model_version in ('v0-research','v1-expanded-research')
 on conflict (prediction_id) do nothing;
 
@@ -222,7 +225,7 @@ revoke all on function public.settle_scanner_results() from public;
 revoke all on function public.settle_scanner_results() from anon;
 revoke all on function public.settle_scanner_results() from authenticated;
 
-comment on table public.scanner_pick_log is 'Permanent audit log of every calibrated EVE pick that reached published status. A pick stays in history even if later match-day reanalysis suppresses it.';
+comment on table public.scanner_pick_log is 'Permanent audit log of every FINAL calibrated EVE pick. Raw pre-calibration candidates are excluded. A logged pick stays in history even if later match-day reanalysis suppresses it.';
 comment on function public.settle_scanner_results() is 'Settles logged core and expanded EVE picks from completed match data. Missing required statistics remain pending rather than becoming false losses.';
 comment on view public.scanner_result_log is 'Public chronological results feed used by the Results page. Win percentage excludes pending/awaiting-data rows.';
 
