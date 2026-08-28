@@ -1,12 +1,16 @@
 .results-shortcut {
-  position: fixed; right: 18px; bottom: 18px; z-index: 30;
-  display: inline-flex; align-items: center; justify-content: center;
-  min-width: 92px; padding: 11px 14px; border-radius: 999px;
-  border: 1px solid rgba(100,209,141,.28); background: rgba(10,34,20,.94);
-  color: #9ce8b5; text-decoration: none; font-size: 11px; font-weight: 900;
-  letter-spacing: .04em; box-shadow: 0 12px 35px rgba(0,0,0,.35); backdrop-filter: blur(12px);
+  position: fixed; right: 18px; bottom: 18px; z-index: 60;
+  display: inline-flex; align-items: center; justify-content: center; gap: 10px;
+  min-width: 150px; padding: 12px 16px; border-radius: 16px;
+  border: 1px solid rgba(111,235,155,.55); background: linear-gradient(145deg, rgba(28,132,70,.98), rgba(10,75,39,.98));
+  color: #f1fff6; text-decoration: none; font-size: 12px; font-weight: 900;
+  letter-spacing: .05em; box-shadow: 0 14px 40px rgba(0,0,0,.45), 0 0 0 4px rgba(70,214,121,.09); backdrop-filter: blur(12px);
 }
-.results-shortcut:hover { background: rgba(31,100,55,.94); color: #e8fff0; }
+.results-shortcut:hover { background: linear-gradient(145deg, rgba(38,158,85,.99), rgba(12,91,46,.99)); color: #fff; transform: translateY(-1px); }
+.results-shortcut-icon { font-size: 20px; line-height: 1; }
+.results-shortcut > span:last-child { display:flex; flex-direction:column; align-items:flex-start; line-height:1.05; }
+.results-shortcut strong { font-size:12px; color:#fff; }
+.results-shortcut small { margin-top:3px; font-size:8px; color:#a8edbe; letter-spacing:.12em; }
 .results-nav a {
   display:flex; align-items:center; gap:6px; padding:8px 10px; border-radius:10px;
   border:1px solid transparent; color:#7f9389; text-decoration:none;
@@ -44,7 +48,8 @@
   .result-outcome { justify-self:start; }
 }
 @media (max-width:700px) {
-  .results-shortcut { right:12px; bottom:12px; min-width:82px; padding:9px 12px; }
+  .results-shortcut { right:12px; bottom:12px; min-width:132px; padding:10px 13px; border-radius:14px; }
+  .results-shortcut-icon { font-size:18px; }
   .results-topbar { align-items:flex-start; }
   .results-nav { display:grid; grid-template-columns:repeat(3,1fr); width:100%; }
   .results-nav a { justify-content:center; padding:7px 6px; font-size:10px; }
