@@ -17,7 +17,13 @@ function Root(){
   },[])
 
   if(results)return <ResultsPage/>
-  return <><App/><a className="results-shortcut" href="#/results">Results</a></>
+  return <>
+    <App/>
+    <a className="results-shortcut" href="#/results" aria-label="Open EVE results and win rate">
+      <span className="results-shortcut-icon">🏆</span>
+      <span><strong>RESULTS</strong><small>WIN RATE</small></span>
+    </a>
+  </>
 }
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
