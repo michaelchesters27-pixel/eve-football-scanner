@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { createClient } from '@supabase/supabase-js'
-import { Activity, BarChart3, CheckCircle2, Clock3, Database, Layers3, Trophy, XCircle } from 'lucide-react'
+import { Activity, BarChart3, CheckCircle2, Clock3, Database, Layers3, Trophy } from 'lucide-react'
 
 type ResultOutcome = 'win' | 'loss' | 'void' | 'push' | 'pending' | 'awaiting_data'
 type ResultRow = {
@@ -51,7 +51,7 @@ type ComboResultRow = {
   outcome: ResultOutcome
 }
 
-type Filter = 'all' | 'win' | 'loss' | 'pending' | 'best_bets' | 'market_lab'
+type Filter = 'all' | 'win' | 'loss' | 'pending' | 'grade_a' | 'grade_a_plus'
 type ComboFilter = 'all' | 'single' | 'double' | 'treble' | 'win' | 'loss' | 'pending'
 type Mode = 'scanner' | 'combo'
 
@@ -98,7 +98,8 @@ export default function ResultsPage() {
     else {
       const resultRows=(scanner.data??[]) as ResultRow[]
       setRows(resultRows)
-      setMessage(resultRows.length ? `${resultRows.length} final EVE picks permanently logged` : 'No final scanner picks logged yet')
+      const bestBetCount=resultRows.filter((row)=>row.sourcePage==='best_bets').length
+      setMessage(bestBetCount ? `${bestBetCount} final Best Bets permanently logged` : 'No final Best Bets logged yet')
     }
     if (combos.error) { setComboMessage('Combo results patch not installed yet'); setComboRows([]) }
     else {
@@ -119,16 +120,25 @@ export default function ResultsPage() {
     return () => { cancelled = true; window.clearInterval(timer) }
   }, [supabase])
 
-  const settled = rows.filter((r) => r.outcome === 'win' || r.outcome === 'loss')
+  const bestBetRows = rows.filter((r) => r.sourcePage === 'best_bets')
+  const settled = bestBetRows.filter((r) => r.outcome === 'win' || r.outcome === 'loss')
   const wins = settled.filter((r) => r.outcome === 'win').length
   const losses = settled.filter((r) => r.outcome === 'loss').length
-  const pending = rows.filter((r) => isPending(r.outcome)).length
+  const pending = bestBetRows.filter((r) => isPending(r.outcome)).length
   const winRate = pct(wins,settled.length)
+  const gradeStats = (grade:string) => {
+    const all=bestBetRows.filter((r)=>r.grade.toUpperCase()===grade)
+    const gradeSettled=all.filter((r)=>r.outcome==='win'||r.outcome==='loss')
+    const gradeWins=gradeSettled.filter((r)=>r.outcome==='win').length
+    return { all:all.length, settled:gradeSettled.length, wins:gradeWins, rate:pct(gradeWins,gradeSettled.length) }
+  }
+  const gradeA=gradeStats('A'), gradeAPlus=gradeStats('A+')
 
-  const filtered = rows.filter((r) => {
+  const filtered = bestBetRows.filter((r) => {
     if (filter === 'all') return true
     if (filter === 'pending') return isPending(r.outcome)
-    if (filter === 'best_bets' || filter === 'market_lab') return r.sourcePage === filter
+    if (filter === 'grade_a') return r.grade.toUpperCase() === 'A'
+    if (filter === 'grade_a_plus') return r.grade.toUpperCase() === 'A+'
     return r.outcome === filter
   })
 
@@ -162,25 +172,25 @@ export default function ResultsPage() {
 
     <main className="results-main">
       <section className="hero compact-hero">
-        <div><div className="eyebrow">LIVE TRACK RECORD</div><h2>Every EVE pick.<br/><span>Win or lose.</span></h2><p>Scanner picks and Combo Lab are tracked separately. This is forward/live performance, not the historical backtest.</p></div>
+        <div><div className="eyebrow">LIVE TRACK RECORD</div><h2>Every EVE pick.<br/><span>Win or lose.</span></h2><p>Best Bets and Combo Lab are tracked separately. This is forward/live performance, not the historical backtest.</p></div>
         <div className="hero-status"><Database size={19}/><div><strong>Results status</strong><span>{activeMessage}</span></div></div>
       </section>
 
       <div className="results-mode-switch">
-        <button className={mode==='scanner'?'active':''} onClick={()=>setMode('scanner')}><Trophy size={16}/>Scanner Picks</button>
+        <button className={mode==='scanner'?'active':''} onClick={()=>setMode('scanner')}><Trophy size={16}/>Best Bets Results</button>
         <button className={mode==='combo'?'active':''} onClick={()=>setMode('combo')}><Layers3 size={16}/>Combo Lab Results</button>
       </div>
 
       {mode==='scanner' ? <>
         <section className="kpis results-kpis">
-          <div className="kpi-card"><div className="kpi-icon"><CheckCircle2 size={18}/></div><div><span>Wins</span><strong>{wins}</strong><small>Settled wins</small></div></div>
-          <div className="kpi-card"><div className="kpi-icon result-loss-icon"><XCircle size={18}/></div><div><span>Losses</span><strong>{losses}</strong><small>Settled losses</small></div></div>
-          <div className="kpi-card"><div className="kpi-icon"><Trophy size={18}/></div><div><span>Win percentage</span><strong>{winRate==null?'—':`${winRate}%`}</strong><small>Wins ÷ settled</small></div></div>
-          <div className="kpi-card"><div className="kpi-icon result-pending-icon"><Clock3 size={18}/></div><div><span>Pending</span><strong>{pending}</strong><small>Excluded from win %</small></div></div>
+          <div className="kpi-card grade-kpi grade-a-kpi"><div className="kpi-icon"><CheckCircle2 size={18}/></div><div><span>Grade A win %</span><strong>{gradeA.rate==null?'—':`${gradeA.rate}%`}</strong><small>{gradeA.wins}/{gradeA.settled} settled · {gradeA.all} logged</small></div></div>
+          <div className="kpi-card grade-kpi grade-a-plus-kpi"><div className="kpi-icon"><Trophy size={18}/></div><div><span>Grade A+ win %</span><strong>{gradeAPlus.rate==null?'—':`${gradeAPlus.rate}%`}</strong><small>{gradeAPlus.wins}/{gradeAPlus.settled} settled · {gradeAPlus.all} logged</small></div></div>
+          <div className="kpi-card"><div className="kpi-icon"><Trophy size={18}/></div><div><span>Overall win %</span><strong>{winRate==null?'—':`${winRate}%`}</strong><small>{wins} wins · {losses} losses</small></div></div>
+          <div className="kpi-card"><div className="kpi-icon result-pending-icon"><Clock3 size={18}/></div><div><span>Best Bets pending</span><strong>{pending}</strong><small>Excluded from win %</small></div></div>
         </section>
-        <section className="qualification-panel results-explainer"><div className="qualification-count"><CheckCircle2 size={20}/><strong>{settled.length} SETTLED PICKS · {rows.length} TOTAL LOGGED</strong></div><p>Only final calibrated Best Bets and Market Lab signals are counted. Missing data and upcoming games stay pending.</p></section>
-        <section className="scanner-section"><div className="section-head"><div><div className="eyebrow">PICK-BY-PICK LOG</div><h3>Date · Event · Bet · Result</h3></div><div className="tabs results-tabs"><button className={filter==='all'?'active':''} onClick={()=>setFilter('all')}>All</button><button className={filter==='win'?'active':''} onClick={()=>setFilter('win')}>Wins</button><button className={filter==='loss'?'active':''} onClick={()=>setFilter('loss')}>Losses</button><button className={filter==='pending'?'active':''} onClick={()=>setFilter('pending')}>Pending</button><button className={filter==='best_bets'?'active':''} onClick={()=>setFilter('best_bets')}>Best Bets</button><button className={filter==='market_lab'?'active':''} onClick={()=>setFilter('market_lab')}>Market Lab</button></div></div>
-          {filtered.length?<div className="result-list">{filtered.map((row)=><article className="result-row-card" key={row.id}><div className="result-date"><span>{dateLabel(row.kickoffUtc)}</span><small>{row.country} · {row.league}</small></div><div className="result-event"><strong>{row.homeTeam} <i>vs</i> {row.awayTeam}</strong><small>{row.homeGoals!=null&&row.awayGoals!=null?`Final score ${row.homeGoals}-${row.awayGoals}`:row.fixtureStatus.toUpperCase()}</small></div><div className="result-bet"><span>{row.sourcePage==='best_bets'?'BEST BETS':'MARKET LAB'}</span><strong>{row.selection}</strong><small>EVE {row.confidence}% · Grade {row.grade} · Data {row.dataQuality}%</small></div><div className={`result-outcome outcome-${row.outcome}`}><strong>{statusLabel(row.outcome)}</strong></div></article>)}</div>:<div className="empty-state"><Database size={21}/><span>No results match this filter yet.</span></div>}
+        <section className="qualification-panel results-explainer"><div className="qualification-count"><CheckCircle2 size={20}/><strong>{settled.length} SETTLED BEST BETS · {bestBetRows.length} TOTAL LOGGED</strong></div><p>Only final calibrated picks actually published on the Best Bets page are counted here. Market Lab signals are not mixed into this record.</p><div className="qualification-rule"><Trophy size={17}/><span><strong>Grade comparison:</strong> Grade A and Grade A+ are tracked separately. Any grade with fewer than 10 settled bets is provisional.</span></div></section>
+        <section className="scanner-section"><div className="section-head"><div><div className="eyebrow">BEST-BET-BY-BEST-BET LOG</div><h3>Grade A · Grade A+ · Result</h3></div><div className="tabs results-tabs"><button className={filter==='all'?'active':''} onClick={()=>setFilter('all')}>All</button><button className={filter==='win'?'active':''} onClick={()=>setFilter('win')}>Wins</button><button className={filter==='loss'?'active':''} onClick={()=>setFilter('loss')}>Losses</button><button className={filter==='pending'?'active':''} onClick={()=>setFilter('pending')}>Pending</button><button className={filter==='grade_a'?'active':''} onClick={()=>setFilter('grade_a')}>Grade A</button><button className={filter==='grade_a_plus'?'active':''} onClick={()=>setFilter('grade_a_plus')}>Grade A+</button></div></div>
+          {filtered.length?<div className="result-list">{filtered.map((row)=><article className="result-row-card" key={row.id}><div className="result-date"><span>{dateLabel(row.kickoffUtc)}</span><small>{row.country} · {row.league}</small></div><div className="result-event"><strong>{row.homeTeam} <i>vs</i> {row.awayTeam}</strong><small>{row.homeGoals!=null&&row.awayGoals!=null?`Final score ${row.homeGoals}-${row.awayGoals}`:row.fixtureStatus.toUpperCase()}</small></div><div className="result-bet"><div className="result-bet-tags"><span>BEST BETS</span><span className={`result-grade-badge ${row.grade.toUpperCase()==='A+'?'grade-a-plus':''}`}>GRADE {row.grade}</span></div><strong>{row.selection}</strong><small>EVE {row.confidence}% · Data {row.dataQuality}%</small></div><div className={`result-outcome outcome-${row.outcome}`}><strong>{statusLabel(row.outcome)}</strong></div></article>)}</div>:<div className="empty-state"><Database size={21}/><span>No Best Bet results match this filter yet.</span></div>}
         </section>
       </> : <>
         <section className="kpis results-kpis combo-kpis">
@@ -195,6 +205,6 @@ export default function ResultsPage() {
         </section>
       </>}
     </main>
-    <footer>EVE Football Scanner · Scanner and Combo Lab tracked separately · Pending results excluded from win percentages</footer>
+    <footer>EVE Football Scanner · Best Bets and Combo Lab tracked separately · Grade A and A+ reported independently</footer>
   </div>
 }
