@@ -49,6 +49,7 @@ type ComboResultRow = {
   homeGoals?: number | null
   awayGoals?: number | null
   outcome: ResultOutcome
+  refreshedAt?: string | null
 }
 
 type Filter = 'all' | 'win' | 'loss' | 'pending' | 'grade_a' | 'grade_a_plus'
@@ -75,6 +76,16 @@ function statusLabel(outcome: ResultOutcome) {
 }
 function isPending(outcome: ResultOutcome) { return outcome === 'pending' || outcome === 'awaiting_data' }
 function pct(wins:number, settled:number){ return settled ? Math.round(wins / settled * 1000) / 10 : null }
+function latestTimestamp(values: Array<string | null | undefined>) {
+  let latest: Date | null = null
+  for (const value of values) {
+    if (!value) continue
+    const date = new Date(value)
+    if (Number.isNaN(date.getTime())) continue
+    if (!latest || date.getTime() > latest.getTime()) latest = date
+  }
+  return latest ? dateLabel(latest.toISOString()) : null
+}
 
 export default function ResultsPage() {
   const url = import.meta.env.VITE_SUPABASE_URL as string | undefined
@@ -91,21 +102,24 @@ export default function ResultsPage() {
   const load = async () => {
     if (!supabase) { setMessage('Supabase is not connected'); setComboMessage('Supabase is not connected'); return }
     const [scanner, combos] = await Promise.all([
-      supabase.from('scanner_result_log').select('*').order('kickoffUtc', { ascending: false }).limit(500),
+      supabase.from('scanner_result_log').select('*').eq('sourcePage', 'best_bets').order('kickoffUtc', { ascending: false }).limit(500),
       supabase.from('combo_result_log').select('*').order('kickoffUtc', { ascending: false }).limit(1000),
     ])
     if (scanner.error) { setMessage(`Results view not ready: ${scanner.error.message}`); setRows([]) }
     else {
       const resultRows=(scanner.data??[]) as ResultRow[]
       setRows(resultRows)
-      const bestBetCount=resultRows.filter((row)=>row.sourcePage==='best_bets').length
-      setMessage(bestBetCount ? `${bestBetCount} final Best Bets permanently logged` : 'No final Best Bets logged yet')
+      const settledCount=resultRows.filter((row)=>row.outcome==='win'||row.outcome==='loss').length
+      const pendingCount=resultRows.filter((row)=>isPending(row.outcome)).length
+      setMessage(resultRows.length ? `${settledCount} settled · ${pendingCount} pending · ${resultRows.length} Best Bets logged` : 'No final Best Bets logged yet')
     }
     if (combos.error) { setComboMessage('Combo results patch not installed yet'); setComboRows([]) }
     else {
       const resultRows=(combos.data??[]) as ComboResultRow[]
       setComboRows(resultRows)
-      setComboMessage(resultRows.length ? `${resultRows.length} Combo Lab singles/doubles/trebles permanently tracked` : 'No Combo Lab recommendations logged yet')
+      const settledCount=resultRows.filter((row)=>row.outcome==='win'||row.outcome==='loss').length
+      const pendingCount=resultRows.filter((row)=>isPending(row.outcome)).length
+      setComboMessage(resultRows.length ? `${settledCount} settled · ${pendingCount} pending · ${resultRows.length} combo selections tracked` : 'No Combo Lab recommendations logged yet')
     }
   }
 
@@ -120,7 +134,7 @@ export default function ResultsPage() {
     return () => { cancelled = true; window.clearInterval(timer) }
   }, [supabase])
 
-  const bestBetRows = rows.filter((r) => r.sourcePage === 'best_bets')
+  const bestBetRows = rows
   const settled = bestBetRows.filter((r) => r.outcome === 'win' || r.outcome === 'loss')
   const wins = settled.filter((r) => r.outcome === 'win').length
   const losses = settled.filter((r) => r.outcome === 'loss').length
@@ -159,7 +173,10 @@ export default function ResultsPage() {
     return r.outcome===comboFilter
   })
 
+  const scannerLastUpdated=latestTimestamp(bestBetRows.map((row)=>row.settledAt))
+  const comboLastUpdated=latestTimestamp(comboRows.map((row)=>row.refreshedAt))
   const activeMessage=mode==='scanner'?message:comboMessage
+  const activeLastUpdated=mode==='scanner'?(scannerLastUpdated??'No settled Best Bets yet'):(comboLastUpdated??'No Combo Lab result refresh yet')
 
   return <div className="app-shell results-shell">
     <header className="topbar results-topbar">
@@ -173,7 +190,7 @@ export default function ResultsPage() {
     <main className="results-main">
       <section className="hero compact-hero">
         <div><div className="eyebrow">LIVE TRACK RECORD</div><h2>Every EVE pick.<br/><span>Win or lose.</span></h2><p>Best Bets and Combo Lab are tracked separately. This is forward/live performance, not the historical backtest.</p></div>
-        <div className="hero-status"><Database size={19}/><div><strong>Results status</strong><span>{activeMessage}</span></div></div>
+        <div className="hero-status"><Database size={19}/><div><strong>Results status</strong><span>{activeMessage}<br/>Last result update: {activeLastUpdated}</span></div></div>
       </section>
 
       <div className="results-mode-switch">
@@ -185,10 +202,10 @@ export default function ResultsPage() {
         <section className="kpis results-kpis">
           <div className="kpi-card grade-kpi grade-a-kpi"><div className="kpi-icon"><CheckCircle2 size={18}/></div><div><span>Grade A win %</span><strong>{gradeA.rate==null?'—':`${gradeA.rate}%`}</strong><small>{gradeA.wins}/{gradeA.settled} settled · {gradeA.all} logged</small></div></div>
           <div className="kpi-card grade-kpi grade-a-plus-kpi"><div className="kpi-icon"><Trophy size={18}/></div><div><span>Grade A+ win %</span><strong>{gradeAPlus.rate==null?'—':`${gradeAPlus.rate}%`}</strong><small>{gradeAPlus.wins}/{gradeAPlus.settled} settled · {gradeAPlus.all} logged</small></div></div>
-          <div className="kpi-card"><div className="kpi-icon"><Trophy size={18}/></div><div><span>Overall win %</span><strong>{winRate==null?'—':`${winRate}%`}</strong><small>{wins} wins · {losses} losses</small></div></div>
+          <div className="kpi-card"><div className="kpi-icon"><Trophy size={18}/></div><div><span>Overall win %</span><strong>{winRate==null?'—':`${winRate}%`}</strong><small>{wins} wins · {losses} losses · settled only</small></div></div>
           <div className="kpi-card"><div className="kpi-icon result-pending-icon"><Clock3 size={18}/></div><div><span>Best Bets pending</span><strong>{pending}</strong><small>Excluded from win %</small></div></div>
         </section>
-        <section className="qualification-panel results-explainer"><div className="qualification-count"><CheckCircle2 size={20}/><strong>{settled.length} SETTLED BEST BETS · {bestBetRows.length} TOTAL LOGGED</strong></div><p>Only final calibrated picks actually published on the Best Bets page are counted here. Market Lab signals are not mixed into this record.</p><div className="qualification-rule"><Trophy size={17}/><span><strong>Grade comparison:</strong> Grade A and Grade A+ are tracked separately. Any grade with fewer than 10 settled bets is provisional.</span></div></section>
+        <section className="qualification-panel results-explainer"><div className="qualification-count"><CheckCircle2 size={20}/><strong>{settled.length} SETTLED BEST BETS · {bestBetRows.length} TOTAL LOGGED</strong></div><p>Only final calibrated picks actually published on the Best Bets page are counted here. Market Lab signals are excluded at the database query, so they cannot be mixed into this record.</p><div className="qualification-rule"><Trophy size={17}/><span><strong>Grade comparison:</strong> Grade A and Grade A+ are tracked separately. Any grade with fewer than 10 settled bets is provisional.</span></div></section>
         <section className="scanner-section"><div className="section-head"><div><div className="eyebrow">BEST-BET-BY-BEST-BET LOG</div><h3>Grade A · Grade A+ · Result</h3></div><div className="tabs results-tabs"><button className={filter==='all'?'active':''} onClick={()=>setFilter('all')}>All</button><button className={filter==='win'?'active':''} onClick={()=>setFilter('win')}>Wins</button><button className={filter==='loss'?'active':''} onClick={()=>setFilter('loss')}>Losses</button><button className={filter==='pending'?'active':''} onClick={()=>setFilter('pending')}>Pending</button><button className={filter==='grade_a'?'active':''} onClick={()=>setFilter('grade_a')}>Grade A</button><button className={filter==='grade_a_plus'?'active':''} onClick={()=>setFilter('grade_a_plus')}>Grade A+</button></div></div>
           {filtered.length?<div className="result-list">{filtered.map((row)=><article className="result-row-card" key={row.id}><div className="result-date"><span>{dateLabel(row.kickoffUtc)}</span><small>{row.country} · {row.league}</small></div><div className="result-event"><strong>{row.homeTeam} <i>vs</i> {row.awayTeam}</strong><small>{row.homeGoals!=null&&row.awayGoals!=null?`Final score ${row.homeGoals}-${row.awayGoals}`:row.fixtureStatus.toUpperCase()}</small></div><div className="result-bet"><div className="result-bet-tags"><span>BEST BETS</span><span className={`result-grade-badge ${row.grade.toUpperCase()==='A+'?'grade-a-plus':''}`}>GRADE {row.grade}</span></div><strong>{row.selection}</strong><small>EVE {row.confidence}% · Data {row.dataQuality}%</small></div><div className={`result-outcome outcome-${row.outcome}`}><strong>{statusLabel(row.outcome)}</strong></div></article>)}</div>:<div className="empty-state"><Database size={21}/><span>No Best Bet results match this filter yet.</span></div>}
         </section>
@@ -199,7 +216,7 @@ export default function ResultsPage() {
           <div className="kpi-card"><div className="kpi-icon"><Trophy size={18}/></div><div><span>Trebles win %</span><strong>{trebles.rate==null?'—':`${trebles.rate}%`}</strong><small>{trebles.wins}/{trebles.settled} settled</small></div></div>
           <div className="kpi-card"><div className="kpi-icon result-pending-icon"><Clock3 size={18}/></div><div><span>Combo pending</span><strong>{comboPending}</strong><small>Excluded from win %</small></div></div>
         </section>
-        <section className="qualification-panel results-explainer"><div className="qualification-count"><Layers3 size={20}/><strong>{comboSettled.length} SETTLED COMBOS · {comboRows.length} TOTAL TRACKED</strong></div><p>Combo Lab has its own record. Singles, doubles and trebles are not mixed into the normal scanner win percentage. Overall Combo Lab settled win rate: <strong>{pct(comboWins,comboSettled.length)==null?'—':`${pct(comboWins,comboSettled.length)}%`}</strong>.</p><div className="qualification-rule"><Database size={17}/><span><strong>Rule:</strong> a double or treble wins only when every leg lands. Historical combo probability is the empirical joint rate EVE showed when the combo was frozen.</span></div></section>
+        <section className="qualification-panel results-explainer"><div className="qualification-count"><Layers3 size={20}/><strong>{comboSettled.length} SETTLED COMBO SELECTIONS · {comboRows.length} TOTAL TRACKED</strong></div><p>Combo Lab has its own record. Singles, doubles and trebles are not mixed into the normal scanner win percentage. Overall Combo Lab settled win rate: <strong>{pct(comboWins,comboSettled.length)==null?'—':`${pct(comboWins,comboSettled.length)}%`}</strong>.</p><div className="qualification-rule"><Database size={17}/><span><strong>Rule:</strong> a double or treble wins only when every leg lands. Historical combo probability is the empirical joint rate EVE showed when the combo was frozen.</span></div></section>
         <section className="scanner-section"><div className="section-head"><div><div className="eyebrow">COMBO-BY-COMBO LOG</div><h3>Singles · Doubles · Trebles</h3></div><div className="tabs results-tabs"><button className={comboFilter==='all'?'active':''} onClick={()=>setComboFilter('all')}>All</button><button className={comboFilter==='single'?'active':''} onClick={()=>setComboFilter('single')}>Singles</button><button className={comboFilter==='double'?'active':''} onClick={()=>setComboFilter('double')}>Doubles</button><button className={comboFilter==='treble'?'active':''} onClick={()=>setComboFilter('treble')}>Trebles</button><button className={comboFilter==='win'?'active':''} onClick={()=>setComboFilter('win')}>Wins</button><button className={comboFilter==='loss'?'active':''} onClick={()=>setComboFilter('loss')}>Losses</button><button className={comboFilter==='pending'?'active':''} onClick={()=>setComboFilter('pending')}>Pending</button></div></div>
           {filteredCombos.length?<div className="result-list">{filteredCombos.map((row)=><article className="result-row-card" key={row.id}><div className="result-date"><span>{dateLabel(row.kickoffUtc)}</span><small>{row.country} · {row.league}</small></div><div className="result-event"><strong>{row.homeTeam} <i>vs</i> {row.awayTeam}</strong><small>{row.homeGoals!=null&&row.awayGoals!=null?`Final score ${row.homeGoals}-${row.awayGoals}`:row.fixtureStatus.toUpperCase()}</small></div><div className="result-bet combo-result-bet"><span>{row.comboType.toUpperCase()}</span><strong>{(row.legLabels??[]).join(' + ')}</strong><small>Historical joint rate {row.historicalProbability==null?'—':`${Number(row.historicalProbability).toFixed(1)}%`} · Sample {row.sampleSize} · Data {row.dataQuality}%</small></div><div className={`result-outcome outcome-${row.outcome}`}><strong>{statusLabel(row.outcome)}</strong></div></article>)}</div>:<div className="empty-state"><Database size={21}/><span>{comboMessage}</span></div>}
         </section>
