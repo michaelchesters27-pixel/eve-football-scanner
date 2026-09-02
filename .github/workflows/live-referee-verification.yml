@@ -1,0 +1,88 @@
+name: EVE live referee verification
+
+on:
+  push:
+    paths:
+      - '.github/workflows/live-referee-verification.yml'
+  workflow_dispatch:
+
+jobs:
+  referee-verification:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      BASE_URL: https://hackysfootyscanner.netlify.app
+    steps:
+      - name: Wait for Netlify edge
+        run: sleep 20
+
+      - name: Live referee audit before backtest
+        run: |
+          curl --retry 5 --retry-delay 5 --fail --silent --show-error \
+            "$BASE_URL/.netlify/functions/referee-audit" -o audit-before.json
+          python -m json.tool audit-before.json
+          python - <<'PY'
+          import json
+          d=json.load(open('audit-before.json'))
+          if not d.get('ok'):
+              raise SystemExit('Live referee audit returned ok=false')
+          print('AUDIT SUMMARY:', json.dumps(d.get('summary',{}), sort_keys=True))
+          PY
+
+      - name: Trigger both strict referee walk-forward tests
+        run: |
+          date -u +%Y-%m-%dT%H:%M:%SZ > verification-start.txt
+          curl --retry 5 --retry-delay 5 --fail --silent --show-error \
+            -X POST "$BASE_URL/.netlify/functions/referee-backtest-now-background" -o trigger.txt
+          echo 'BACKGROUND TRIGGER RESPONSE:'
+          cat trigger.txt || true
+
+      - name: Wait for fresh referee backtests
+        run: |
+          START=$(cat verification-start.txt)
+          echo "Waiting for tests started at or after $START"
+          for i in $(seq 1 36); do
+            curl --retry 3 --retry-delay 3 --fail --silent --show-error \
+              "$BASE_URL/.netlify/functions/referee-backtest-status" -o referee-status.json
+            echo "Poll $i"
+            python -m json.tool referee-status.json
+            if python - "$START" <<'PY'
+          import json,sys
+          from datetime import datetime, timezone
+          start=datetime.fromisoformat(sys.argv[1].replace('Z','+00:00'))
+          d=json.load(open('referee-status.json'))
+          tests=d.get('tests') or []
+          wanted={'backtest-referee-v2-2526','backtest-referee-v2-match-cards-2526'}
+          seen=set()
+          for t in tests:
+              job=t.get('job')
+              run=t.get('run') or {}
+              if job not in wanted or not run.get('started_at'):
+                  continue
+              ts=datetime.fromisoformat(run['started_at'].replace('Z','+00:00'))
+              if ts >= start and run.get('status')=='success' and run.get('finished_at'):
+                  seen.add(job)
+              if ts >= start and run.get('status')=='failed':
+                  raise SystemExit(f'{job} failed')
+          ok=seen==wanted
+          print('Fresh successful tests:', sorted(seen))
+          raise SystemExit(0 if ok else 1)
+          PY
+            then
+              echo 'Both fresh walk-forward tests completed successfully.'
+              break
+            fi
+            if [ "$i" -eq 36 ]; then
+              echo 'Timed out waiting for both fresh referee backtests.'
+              exit 1
+            fi
+            sleep 20
+          done
+
+      - name: Final live referee audit
+        run: |
+          curl --retry 5 --retry-delay 5 --fail --silent --show-error \
+            "$BASE_URL/.netlify/functions/referee-audit" -o audit-after.json
+          python -m json.tool audit-after.json
+          echo 'FINAL BACKTEST STATUS:'
+          python -m json.tool referee-status.json
