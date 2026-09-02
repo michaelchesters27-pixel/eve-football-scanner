@@ -1,5 +1,8 @@
 import { createClient } from '@supabase/supabase-js'
 import { reconcileFixtureReferee } from './_shared/referee-reconcile'
+import { refineFixtureRefereeIntelligence } from './refine-referee-intelligence'
+import applyCoreCalibration from './apply-calibration'
+import applyExpandedCalibration from './apply-expanded-calibration'
 
 function env(name:string){const value=process.env[name];if(!value) throw new Error(`Missing required environment variable: ${name}`);return value}
 
@@ -22,8 +25,14 @@ export default async(request:Request)=>{
   }
   if(!fixtureId) return new Response(JSON.stringify({ok:true,matched:false,note:'No active fixture with a confirmed referee is currently available to reconcile.'}),{headers:{'content-type':'application/json','cache-control':'no-store'}})
   try{
-    const result=await reconcileFixtureReferee(supabase,fixtureId)
-    return new Response(JSON.stringify({ok:true,...result}),{headers:{'content-type':'application/json','cache-control':'no-store'}})
+    const reconciliation=await reconcileFixtureReferee(supabase,fixtureId)
+    const refinement=await refineFixtureRefereeIntelligence(supabase,fixtureId)
+    const coreResponse=await applyCoreCalibration(),expandedResponse=await applyExpandedCalibration()
+    const calibration={
+      core:coreResponse.ok?await coreResponse.json():{ok:false,error:await coreResponse.text()},
+      expanded:expandedResponse.ok?await expandedResponse.json():{ok:false,error:await expandedResponse.text()},
+    }
+    return new Response(JSON.stringify({ok:true,...reconciliation,refinement,calibration}),{headers:{'content-type':'application/json','cache-control':'no-store'}})
   }catch(error){
     return new Response(JSON.stringify({ok:false,fixtureId,error:error instanceof Error?error.message:String(error)}),{status:500,headers:{'content-type':'application/json','cache-control':'no-store'}})
   }
