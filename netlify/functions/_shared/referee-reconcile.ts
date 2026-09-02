@@ -89,8 +89,10 @@ export async function reconcileFixtureReferee(supabase:Supabase,fixtureId:string
 export async function reconcileActiveReferees(supabase:Supabase){
   const now=new Date()
   const from=new Date(now.getTime()-180*60000).toISOString()
-  const to=new Date(now.getTime()+8*24*3600000).toISOString()
-  const {data:fixtures,error}=await supabase.from('fixtures').select('id,referee_id').in('status',['scheduled','live']).gte('kickoff',from).lte('kickoff',to).order('kickoff',{ascending:true}).limit(32)
+  // Match the scanner's actionable window: every supported fixture shown in the
+  // next four days can have its referee identity/profile linked before matchday.
+  const to=new Date(now.getTime()+4*24*3600000).toISOString()
+  const {data:fixtures,error}=await supabase.from('fixtures').select('id,referee_id').in('status',['scheduled','live']).gte('kickoff',from).lte('kickoff',to).order('kickoff',{ascending:true}).limit(120)
   if(error) throw error
   const ids=(fixtures??[]).map((f:any)=>f.id)
   if(!ids.length) return {checked:0,matched:0,changed:0,results:[]}
@@ -110,7 +112,7 @@ export async function reconcileActiveReferees(supabase:Supabase){
     }catch(error){results.push({fixtureId:fixture.id,matched:false,error:error instanceof Error?error.message:String(error)})}
   }
   let hydratedAny=false
-  for(const item of unmatched.slice(0,8)){
+  for(const item of unmatched.slice(0,12)){
     try{
       const direct=await hydrateFixtureRefereeProfile(supabase,item.fixture.id,item.officialName)
       if(direct.hydrated){hydratedAny=true;results[item.position]={...results[item.position],directFotMob:true,direct}}
