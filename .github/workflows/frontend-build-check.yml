@@ -1,0 +1,23 @@
+name: EVE frontend build check
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'src/**'
+      - 'package.json'
+      - 'tsconfig*.json'
+      - 'vite.config.ts'
+      - '.github/workflows/frontend-build-check.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --no-audit --no-fund
+      - run: npm run build
