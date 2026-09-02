@@ -1,5 +1,5 @@
 import syncFixtures from '../netlify/functions/sync-fotmob-fixtures'
-import syncMatchday from '../netlify/functions/sync-matchday-context'
+import syncMatchday from '../netlify/functions/sync-matchday-context-safe'
 import canonicalizeFotmobRefs from '../netlify/functions/canonicalize-fotmob-referees'
 import syncSofascoreRefs from '../netlify/functions/sync-sofascore-referees'
 import reconcileRefs from '../netlify/functions/reconcile-referees-uncapped'
@@ -49,8 +49,8 @@ async function main(){
 
   if(stage==='fixtures') await unwrap('FIXTURE REFRESH',await syncFixtures())
   else if(stage==='match-intel'){
-    const parsed=await unwrap('PRIMARY MATCH INTELLIGENCE',await syncMatchday())
-    failOnReportedErrors('PRIMARY MATCH INTELLIGENCE',parsed)
+    const parsed=await unwrap('PRIMARY MATCH INTELLIGENCE + SAFETY',await syncMatchday())
+    failOnReportedErrors('PRIMARY MATCH INTELLIGENCE',parsed?.imported??parsed)
   }
   else if(stage==='canonical-ref'){
     const parsed=await unwrap('EXACT FOTMOB REFEREE CANONICALIZATION',await canonicalizeFotmobRefs())
