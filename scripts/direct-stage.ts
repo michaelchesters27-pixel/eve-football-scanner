@@ -2,11 +2,11 @@ import syncFixtures from '../netlify/functions/sync-fotmob-fixtures'
 import syncMatchday from '../netlify/functions/sync-matchday-context'
 import canonicalizeFotmobRefs from '../netlify/functions/canonicalize-fotmob-referees'
 import syncSofascoreRefs from '../netlify/functions/sync-sofascore-referees'
-import reconcileRefs from '../netlify/functions/reconcile-referees'
+import reconcileRefs from '../netlify/functions/reconcile-referees-uncapped'
 import preModelSafety from '../netlify/functions/pre-model-safety'
 import runScanner from '../netlify/functions/run-scanner'
 import runExpanded from '../netlify/functions/run-expanded-markets'
-import refineRefs from '../netlify/functions/refine-referee-intelligence'
+import refineRefs from '../netlify/functions/refine-referee-intelligence-uncapped'
 import applyCalibration from '../netlify/functions/apply-calibration'
 import applyExpandedCalibration from '../netlify/functions/apply-expanded-calibration'
 import runCombos from '../netlify/functions/run-combos'
@@ -57,11 +57,17 @@ async function main(){
     failOnReportedErrors('EXACT FOTMOB REFEREE CANONICALIZATION',parsed)
   }
   else if(stage==='ref-fallback') await unwrap('SECOND-SOURCE REFEREE FALLBACK',await syncSofascoreRefs())
-  else if(stage==='ref-reconcile') await unwrap('REFEREE RECONCILIATION',await reconcileRefs())
+  else if(stage==='ref-reconcile'){
+    const parsed=await unwrap('UNCAPPED CONFIRMED-REFEREE RECONCILIATION',await reconcileRefs())
+    failOnReportedErrors('UNCAPPED CONFIRMED-REFEREE RECONCILIATION',parsed)
+  }
   else if(stage==='safety') await unwrap('PRE-MODEL SAFETY GATE',await preModelSafety())
   else if(stage==='core') await unwrap('CORE BEST BETS REBUILD',await runScanner())
   else if(stage==='expanded') await unwrap('MARKET LAB REBUILD',await runExpanded(new Request('https://eve.github/run-expanded-markets')))
-  else if(stage==='refine-ref') await unwrap('FULL REFEREE INTELLIGENCE',await refineRefs())
+  else if(stage==='refine-ref'){
+    const parsed=await unwrap('UNCAPPED CONFIRMED REFEREE INTELLIGENCE',await refineRefs())
+    failOnReportedErrors('UNCAPPED CONFIRMED REFEREE INTELLIGENCE',parsed)
+  }
   else if(stage==='cal-core') await unwrap('CORE CALIBRATION',await applyCalibration())
   else if(stage==='cal-expanded') await unwrap('EXPANDED CALIBRATION',await applyExpandedCalibration())
   else if(stage==='combos') await unwrap('COMBO LAB REBUILD',await runCombos(new Request('https://eve.github/run-combos')))
