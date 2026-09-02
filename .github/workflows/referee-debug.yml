@@ -1,0 +1,23 @@
+name: EVE referee payload debug
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/referee-debug.yml'
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      SUPABASE_URL: https://hfmaofmvsmqbxgrwrjqf.supabase.co
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-audit --no-fund
+      - name: Inspect live FotMob referee payload
+        run: npx --yes tsx@4.20.5 scripts/debug-referee-payload.ts
