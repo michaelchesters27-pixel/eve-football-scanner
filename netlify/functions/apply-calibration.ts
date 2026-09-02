@@ -23,6 +23,15 @@ const publishThreshold: Record<Market, number> = {
   goals: 90,   // 302 selections, 85.1% hit, Wilson low 80.6%
 }
 
+// Conservative live fair probabilities are the 95% Wilson lower bounds from the
+// same walk-forward calibration. Setting them here means an hourly referee/XI
+// change can publish or suppress a core pick without waiting for the daily odds job.
+const fairProbability: Record<Market, number> = {
+  cards: 0.656,
+  corners: 0.670,
+  goals: 0.806,
+}
+
 function env(name: string) {
   const value = process.env[name]
   if (!value) throw new Error(`Missing required environment variable: ${name}`)
@@ -76,7 +85,7 @@ export default async () => {
   }
 
   const rows = (data ?? []) as unknown as PredictionRow[]
-  const groups = new Map<string, { grade: Grade; publish_status: 'published' | 'suppressed'; ids: string[] }>()
+  const groups = new Map<string, { grade: Grade; publish_status: 'published' | 'suppressed'; fair_probability: number | null; ids: string[] }>()
   const counts: Record<Market, { evaluated: number; published: number }> = {
     cards: { evaluated: 0, published: 0 },
     corners: { evaluated: 0, published: 0 },
@@ -90,8 +99,9 @@ export default async () => {
     if (publish) counts[market].published += 1
     const grade = calibratedGrade(market, row.confidence)
     const publish_status = publish ? 'published' : 'suppressed'
-    const key = `${grade}|${publish_status}`
-    const group = groups.get(key) ?? { grade, publish_status, ids: [] }
+    const fair_probability = publish ? fairProbability[market] : null
+    const key = `${grade}|${publish_status}|${fair_probability ?? 'null'}`
+    const group = groups.get(key) ?? { grade, publish_status, fair_probability, ids: [] }
     group.ids.push(row.id)
     groups.set(key, group)
   }
@@ -100,7 +110,7 @@ export default async () => {
     for (const ids of chunks(group.ids)) {
       const { error: updateError } = await supabase
         .from('predictions')
-        .update({ grade: group.grade, publish_status: group.publish_status })
+        .update({ grade: group.grade, publish_status: group.publish_status, fair_probability: group.fair_probability })
         .in('id', ids)
       if (updateError) throw updateError
     }
@@ -111,9 +121,10 @@ export default async () => {
     ok: true,
     model: MODEL,
     thresholds: publishThreshold,
+    fairProbability,
     counts,
     totalEvaluated: rows.length,
     totalPublished,
-    note: 'Walk-forward hit-rate calibration only; bookmaker-value edge is not yet established.',
+    note: 'Hourly-safe core calibration: published picks receive conservative Wilson-lower fair probability immediately; suppressed picks have it cleared. Bookmaker prices remain a separate quota-controlled process.',
   }), { headers: { 'content-type': 'application/json' } })
 }
