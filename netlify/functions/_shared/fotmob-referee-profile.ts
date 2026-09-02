@@ -6,19 +6,37 @@ function clean(value:string){return String(value??'').normalize('NFD').replace(/
 function slug(value:string){return clean(value).replace(/ /g,'-')}
 function textFromHtml(html:string){return html.replace(/<script[\s\S]*?<\/script>/gi,' ').replace(/<style[\s\S]*?<\/style>/gi,' ').replace(/<[^>]+>/g,' ').replace(/&nbsp;/gi,' ').replace(/&amp;/gi,'&').replace(/&#x27;/gi,"'").replace(/&quot;/gi,'"').replace(/\s+/g,' ').trim()}
 function numberMatch(text:string,re:RegExp){const m=text.match(re);const n=m?Number(m[1]):NaN;return Number.isFinite(n)?n:null}
+function tokens(value:string){return clean(value).split(' ').filter(Boolean)}
+function nameSimilarity(a:string,b:string){
+  const aa=clean(a),bb=clean(b)
+  if(!aa||!bb) return 0
+  if(aa===bb) return 1
+  const at=tokens(aa),bt=tokens(bb),aset=new Set(at),bset=new Set(bt)
+  const common=[...aset].filter((t)=>bset.has(t)).length
+  const overlap=common/Math.max(at.length,bt.length,1)
+  const surname=at.at(-1)===bt.at(-1)?1:0
+  const firstInitial=at[0]?.[0]&&bt[0]?.[0]&&at[0][0]===bt[0][0]?1:0
+  const subset=Math.min(at.length,bt.length)>=2&&common===Math.min(at.length,bt.length)?1:0
+  return Math.min(1,overlap*.58+surname*.22+firstInitial*.08+subset*.12)
+}
 
 async function fetchHtml(url:string){
-  const response=await fetch(url,{redirect:'follow',headers:{accept:'text/html,application/xhtml+xml','user-agent':'Mozilla/5.0 EVE-Football-Scanner/0.9 referee-profile'}})
+  const response=await fetch(url,{redirect:'follow',headers:{accept:'text/html,application/xhtml+xml','user-agent':'Mozilla/5.0 EVE-Football-Scanner/1.0 referee-profile'}})
   if(!response.ok) throw new Error(`FotMob HTML ${response.status}`)
   return {html:await response.text(),finalUrl:response.url}
 }
 
 function refereeLinkFromMatch(html:string,officialName:string){
-  const wanted=slug(officialName)
   const links=[...html.matchAll(/\/referees\/(\d+)\/([^"'?#<\\]+)/gi)].map((m)=>({id:m[1],slug:m[2]}))
   if(!links.length) return null
-  const exact=links.find((x)=>clean(x.slug)===clean(wanted)||clean(x.slug).includes(clean(officialName))||clean(officialName).includes(clean(x.slug)))
-  return exact??links[0]
+  const ranked=links.map((link)=>({...link,score:nameSimilarity(officialName,link.slug)})).sort((a,b)=>b.score-a.score)
+  const best=ranked[0]
+  const second=ranked[1]
+  // Fail closed. Never use "the first referee link on the page" when identity is
+  // uncertain. A bad referee match is worse than keeping referee influence neutral.
+  if(!best||best.score<.88) return null
+  if(second&&second.score>=best.score-.025) return null
+  return best
 }
 
 function parseProfile(html:string){
@@ -47,7 +65,7 @@ export async function hydrateFixtureRefereeProfile(supabase:Supabase,fixtureId:s
 
   const matchPage=await fetchHtml(`https://www.fotmob.com/match/${encodeURIComponent(String(fixture.source_fixture_id))}`)
   const ref=refereeLinkFromMatch(matchPage.html,officialName)
-  if(!ref) return {hydrated:false,reason:'Referee link not exposed on FotMob match page'}
+  if(!ref) return {hydrated:false,reason:'No unique safe FotMob referee identity match'}
 
   const profilePage=await fetchHtml(`https://www.fotmob.com/referees/${ref.id}/${slug(officialName)}`)
   const parsed=parseProfile(profilePage.html)
