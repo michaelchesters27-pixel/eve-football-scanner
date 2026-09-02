@@ -1,4 +1,4 @@
-import syncMatchday from './sync-matchday-context'
+import syncMatchday from './sync-matchday-context-hardened'
 import preModelSafety from './pre-model-safety'
 
 async function parse(response:Response){
@@ -11,12 +11,15 @@ export default async()=>{
   const imported=await parse(importResponse)
   if(!importResponse.ok||imported?.ok===false) throw new Error(`Match context import failed: ${JSON.stringify(imported)}`)
 
-  // The upstream FotMob payload may contain predicted/provisional XIs in the
-  // same 11+11 shape as actual lineups. Never leave those rows available to a
-  // model after ingestion: validate source evidence and fail closed immediately.
+  // Defense in depth: the hardened importer refuses predicted/provisional XIs
+  // before database insertion. This second gate independently re-checks stored
+  // context before any model stage is allowed to run.
   const safetyResponse=await preModelSafety()
   const safety=await parse(safetyResponse)
   if(!safetyResponse.ok||safety?.ok===false) throw new Error(`Post-import context safety failed: ${JSON.stringify(safety)}`)
 
-  return new Response(JSON.stringify({ok:true,imported,safety,note:'Every match-context import is followed immediately by the official-XI/referee safety gate before the stage can succeed.'}),{headers:{'content-type':'application/json','cache-control':'no-store'}})
+  return new Response(JSON.stringify({
+    ok:true,imported,safety,
+    note:'Primary ingestion rejects predicted/provisional XIs before insert, then the independent pre-model safety gate verifies the stored database state before models can run.',
+  }),{headers:{'content-type':'application/json','cache-control':'no-store'}})
 }
