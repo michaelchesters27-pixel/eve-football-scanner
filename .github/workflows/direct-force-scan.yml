@@ -8,6 +8,8 @@ on:
     paths:
       - '.github/workflows/direct-force-scan.yml'
       - 'scripts/direct-stage.ts'
+      - 'netlify/functions/_shared/fotmob-referee-profile.ts'
+      - 'netlify/functions/_shared/referee-reconcile.ts'
 
 concurrency:
   group: eve-hourly-direct-scan
