@@ -1,119 +1,33 @@
-name: EVE hourly pipeline smoke
+name: EVE pipeline smoke
 
 on:
+  workflow_dispatch:
   push:
     paths:
       - '.github/workflows/hourly-pipeline-smoke.yml'
-  workflow_dispatch:
+      - 'netlify/functions/system-hard-audit.ts'
+
+concurrency:
+  group: eve-pipeline-smoke
+  cancel-in-progress: true
+
+env:
+  SUPABASE_URL: https://hfmaofmvsmqbxgrwrjqf.supabase.co
+  SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
 jobs:
-  live-hourly-pipeline:
+  hard-audit:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-    env:
-      BASE_URL: https://hackysfootyscanner.netlify.app
+    timeout-minutes: 8
     steps:
-      - name: Wait for Netlify deployment
-        run: sleep 75
-
-      - name: Find Celtic fixture from live audit
-        run: |
-          curl --retry 5 --retry-delay 5 --fail --silent --show-error \
-            "$BASE_URL/.netlify/functions/referee-audit" -o before.json
-          python -m json.tool before.json
-          FIXTURE_ID=$(python - <<'PY'
-          import json
-          d=json.load(open('before.json'))
-          rows=[x for x in d.get('fixtures',[]) if str(x.get('homeTeam','')).lower()=='celtic' and 'aberdeen' in str(x.get('awayTeam','')).lower()]
-          if not rows: raise SystemExit('Celtic v Aberdeen missing from referee audit')
-          print(rows[0]['fixtureId'])
-          PY
-          )
-          echo "FIXTURE_ID=$FIXTURE_ID" >> "$GITHUB_ENV"
-
-      - name: Force primary match-detail check for Celtic
-        run: |
-          curl --retry 3 --retry-delay 4 --fail --silent --show-error \
-            "$BASE_URL/.netlify/functions/sync-matchday-now?fixture_id=$FIXTURE_ID" -o context.json
-          python -m json.tool context.json
-
-      - name: Run second-source referee safety net
-        run: |
-          curl --retry 3 --retry-delay 4 --fail --silent --show-error \
-            "$BASE_URL/.netlify/functions/sync-sofascore-now" -o fallback.json
-          python -m json.tool fallback.json
-
-      - name: Link referee profile for Celtic
-        run: |
-          curl --retry 3 --retry-delay 4 --fail --silent --show-error \
-            "$BASE_URL/.netlify/functions/reconcile-referee-now?fixture_id=$FIXTURE_ID" -o reconcile-before-models.json
-          python -m json.tool reconcile-before-models.json
-
-      - name: Rebuild core model
-        run: |
-          curl --retry 3 --retry-delay 4 --fail --silent --show-error \
-            "$BASE_URL/.netlify/functions/run-now" -o core.json
-          python -m json.tool core.json
-
-      - name: Rebuild expanded model for Celtic
-        run: |
-          curl --retry 3 --retry-delay 4 --fail --silent --show-error \
-            "$BASE_URL/.netlify/functions/run-expanded-now?fixture_id=$FIXTURE_ID" -o expanded.json
-          python -m json.tool expanded.json
-
-      - name: Apply referee intelligence and both calibrations
-        run: |
-          curl --retry 3 --retry-delay 4 --fail --silent --show-error \
-            "$BASE_URL/.netlify/functions/reconcile-referee-now?fixture_id=$FIXTURE_ID" -o reconcile-final.json
-          python -m json.tool reconcile-final.json
-
-      - name: Rebuild Combo Lab for Celtic
-        run: |
-          curl --retry 3 --retry-delay 4 --fail --silent --show-error \
-            "$BASE_URL/.netlify/functions/run-combos-now?fixture_id=$FIXTURE_ID" -o combos.json
-          python -m json.tool combos.json
-
-      - name: Prove referee reached the models
-        run: |
-          curl --retry 3 --retry-delay 4 --fail --silent --show-error \
-            "$BASE_URL/.netlify/functions/referee-audit" -o after.json
-          python -m json.tool after.json
-          python - <<'PY'
-          import json
-          d=json.load(open('after.json'))
-          rows=[x for x in d.get('fixtures',[]) if str(x.get('homeTeam','')).lower()=='celtic' and 'aberdeen' in str(x.get('awayTeam','')).lower()]
-          if not rows: raise SystemExit('Celtic v Aberdeen missing after refresh')
-          r=rows[0]
-          print('CELTIC_FINAL:', json.dumps(r, sort_keys=True))
-          if not r.get('refereeConfirmed') or not r.get('officialReferee'): raise SystemExit('Referee name still not confirmed')
-          if 'nicolson' not in str(r.get('officialReferee','')).lower(): raise SystemExit('Expected Duncan Nicolson but received '+str(r.get('officialReferee')))
-          if not r.get('refereeId'): raise SystemExit('Referee name not linked to EVE referee identity')
-          if not r.get('profileUsable') or int(r.get('sample') or 0)<3: raise SystemExit('Linked referee has no usable historical profile')
-          if int(r.get('coreCardSnapshots') or 0)<2 or int(r.get('coreRefined') or 0)<2: raise SystemExit('Full referee intelligence did not reach both core card snapshots')
-          if int(r.get('expandedCardSnapshots') or 0)<1 or int(r.get('expandedRefined') or 0)<1: raise SystemExit('Full referee intelligence did not reach expanded match-card snapshot')
-          print('REFEREE MODEL PIPELINE PASS')
-          PY
-
-      - name: Prove predictions and combo were freshly recalculated
-        run: |
-          curl --retry 3 --retry-delay 4 --fail --silent --show-error \
-            "$BASE_URL/.netlify/functions/fixture-model-audit?fixture_id=$FIXTURE_ID" -o models.json
-          python -m json.tool models.json
-          python - <<'PY'
-          import json, datetime
-          d=json.load(open('models.json'))
-          if not d.get('ok'): raise SystemExit('fixture-model-audit returned ok=false')
-          rows=d.get('predictions') or []
-          core=[x for x in rows if x.get('model')=='v0-research']
-          expanded=[x for x in rows if x.get('model')=='v1-expanded-research']
-          if not core: raise SystemExit('No fresh core predictions found')
-          if not expanded: raise SystemExit('No fresh expanded predictions found')
-          card_core=[x for x in core if x.get('selectionKey') in ('home_cards_1_5','away_cards_1_5')]
-          match_cards=[x for x in expanded if x.get('selectionKey')=='match_cards_3_5']
-          if len(card_core)<2 or not all(x.get('refereeRefined') for x in card_core): raise SystemExit('Core card predictions not referee-refined')
-          if not match_cards or not all(x.get('refereeRefined') for x in match_cards): raise SystemExit('Expanded match cards not referee-refined')
-          published=[x for x in core if x.get('publishStatus')=='published']
-          if any(x.get('fairProbability') is None for x in published): raise SystemExit('Published core prediction missing fair probability after hourly calibration')
-          if not d.get('combo') or not d['combo'].get('calculated_at'): raise SystemExit('Combo Lab was not recalculated')
-          print('MODEL REFRESH PASS; published core rows have fair probability and Combo Lab has a fresh calculation')
-          PY
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --no-audit --no-fund
+      - name: Verify Supabase credentials
+        run: test -n "$SUPABASE_SERVICE_ROLE_KEY"
+      - name: Prove current scanner invariants directly against Supabase
+        env:
+          EVE_STAGE: audit
+        run: npx --yes tsx@4.20.5 scripts/direct-stage.ts
