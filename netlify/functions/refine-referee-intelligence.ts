@@ -42,14 +42,26 @@ function contextFor(snapshot:Snapshot):'home'|'away'|'match'{
 }
 
 export async function refineFixtureRefereeIntelligence(supabase:ReturnType<typeof createClient>,fixtureId:string){
-  let reconciliation:any=null
-  try{reconciliation=await reconcileFixtureReferee(supabase,fixtureId)}catch(error){reconciliation={matched:false,error:error instanceof Error?error.message:String(error)}}
-
-  const {data:fixture,error:fixtureError}=await supabase.from('fixtures').select('id,referee_id,kickoff,status').eq('id',fixtureId).maybeSingle()
+  let {data:fixture,error:fixtureError}=await supabase.from('fixtures').select('id,referee_id,kickoff,status').eq('id',fixtureId).maybeSingle()
   if(fixtureError) throw fixtureError
-  if(!fixture?.referee_id) return {fixtureId,refined:0,reason:'No linked referee',reconciliation}
+  if(!fixture) return {fixtureId,refined:0,reason:'Fixture not found'}
 
-  const profile=await loadBestRefereeProfile(supabase,fixture.referee_id)
+  let reconciliation:any=null
+  let profile=fixture.referee_id?await loadBestRefereeProfile(supabase,fixture.referee_id):null
+  // Reconciliation/hydration is comparatively expensive. Only invoke it when the
+  // fixture does not already have a usable profile; the 15-minute referee job is
+  // responsible for routine identity maintenance.
+  if(!profile||Number(profile.matches_sample??0)<3){
+    try{
+      reconciliation=await reconcileFixtureReferee(supabase,fixtureId)
+      const refreshed=await supabase.from('fixtures').select('id,referee_id,kickoff,status').eq('id',fixtureId).maybeSingle()
+      if(refreshed.error) throw refreshed.error
+      if(refreshed.data) fixture=refreshed.data
+      profile=fixture?.referee_id?await loadBestRefereeProfile(supabase,fixture.referee_id):null
+    }catch(error){reconciliation={matched:false,error:error instanceof Error?error.message:String(error)}}
+  }
+
+  if(!fixture?.referee_id) return {fixtureId,refined:0,reason:'No linked referee',reconciliation}
   if(!profile||Number(profile.matches_sample??0)<3) return {fixtureId,refined:0,reason:'No usable referee profile',reconciliation}
 
   const keys=[...new Set(Object.values(CONFIG).flatMap((x)=>x.keys))]
