@@ -1,0 +1,88 @@
+name: EVE hourly pipeline smoke
+
+on:
+  push:
+    paths:
+      - '.github/workflows/hourly-pipeline-smoke.yml'
+  workflow_dispatch:
+
+jobs:
+  live-hourly-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      BASE_URL: https://hackysfootyscanner.netlify.app
+    steps:
+      - name: Wait for Netlify deployment
+        run: sleep 45
+
+      - name: Refresh fixtures
+        run: |
+          curl --retry 5 --retry-delay 5 --fail --silent --show-error \
+            "$BASE_URL/.netlify/functions/hourly-fixture-refresh" -o fixture-refresh.json
+          python -m json.tool fixture-refresh.json
+
+      - name: Primary match intelligence
+        run: |
+          curl --retry 5 --retry-delay 5 --fail --silent --show-error \
+            "$BASE_URL/.netlify/functions/sync-matchday-context" -o primary-context.json
+          python -m json.tool primary-context.json
+
+      - name: Second-source referee fallback
+        run: |
+          curl --retry 5 --retry-delay 5 --fail --silent --show-error \
+            "$BASE_URL/.netlify/functions/sync-sofascore-referees" -o referee-fallback.json
+          python -m json.tool referee-fallback.json
+
+      - name: Reconcile referee identities and profiles
+        run: |
+          curl --retry 5 --retry-delay 5 --fail --silent --show-error \
+            "$BASE_URL/.netlify/functions/reconcile-referees" -o referee-reconcile.json
+          python -m json.tool referee-reconcile.json
+
+      - name: Rebuild core and expanded models
+        run: |
+          curl --retry 5 --retry-delay 5 --fail --silent --show-error \
+            "$BASE_URL/.netlify/functions/hourly-core-refresh" -o core.json
+          python -m json.tool core.json
+          curl --retry 5 --retry-delay 5 --fail --silent --show-error \
+            "$BASE_URL/.netlify/functions/hourly-expanded-refresh" -o expanded.json
+          python -m json.tool expanded.json
+
+      - name: Apply full referee intelligence and recalibrate
+        run: |
+          curl --retry 5 --retry-delay 5 --fail --silent --show-error \
+            "$BASE_URL/.netlify/functions/refine-referee-intelligence" -o referee-refine.json
+          python -m json.tool referee-refine.json
+          curl --retry 5 --retry-delay 5 --fail --silent --show-error \
+            "$BASE_URL/.netlify/functions/hourly-calibration-refresh" -o calibration.json
+          python -m json.tool calibration.json
+
+      - name: Rebuild Combo Lab
+        run: |
+          curl --retry 5 --retry-delay 5 --fail --silent --show-error \
+            "$BASE_URL/.netlify/functions/hourly-combo-refresh" -o combos.json
+          python -m json.tool combos.json
+
+      - name: Final live referee audit and Celtic check
+        run: |
+          curl --retry 5 --retry-delay 5 --fail --silent --show-error \
+            "$BASE_URL/.netlify/functions/referee-audit" -o audit.json
+          python -m json.tool audit.json
+          python - <<'PY'
+          import json
+          d=json.load(open('audit.json'))
+          if not d.get('ok'):
+              raise SystemExit('referee-audit returned ok=false')
+          fixtures=d.get('fixtures') or []
+          celtic=[x for x in fixtures if str(x.get('homeTeam','')).lower()=='celtic' and 'aberdeen' in str(x.get('awayTeam','')).lower()]
+          print('CELTIC_AUDIT:', json.dumps(celtic, sort_keys=True))
+          if not celtic:
+              raise SystemExit('Celtic v Aberdeen was not present in the live audit')
+          row=celtic[0]
+          if not row.get('refereeConfirmed') or not row.get('officialReferee'):
+              raise SystemExit('Celtic v Aberdeen still has no confirmed referee after the live hourly pipeline')
+          if not row.get('refereeId'):
+              raise SystemExit('Celtic referee name was found but not linked to a referee identity')
+          print('Celtic referee pipeline PASS:', row.get('officialReferee'), 'sample=', row.get('sample'))
+          PY
