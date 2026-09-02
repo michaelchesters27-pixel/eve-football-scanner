@@ -1,0 +1,45 @@
+import { createClient } from '@supabase/supabase-js'
+import { reconcileFixtureReferee } from './_shared/referee-reconcile'
+
+const LOOKBACK_MS=3*60*60*1000
+const LOOKAHEAD_MS=7*24*60*60*1000
+
+function env(name:string){const value=process.env[name];if(!value) throw new Error(`Missing required environment variable: ${name}`);return value}
+function chunks<T>(items:T[],size=100){const out:T[][]=[];for(let i=0;i<items.length;i+=size)out.push(items.slice(i,i+size));return out}
+
+export default async()=>{
+  const supabase=createClient(env('SUPABASE_URL'),env('SUPABASE_SERVICE_ROLE_KEY'),{auth:{persistSession:false,autoRefreshToken:false}})
+  const now=new Date(),from=new Date(now.getTime()-LOOKBACK_MS),to=new Date(now.getTime()+LOOKAHEAD_MS)
+  const {data:fixtures,error:fixtureError}=await supabase.from('fixtures')
+    .select('id,kickoff')
+    .in('status',['scheduled','live'])
+    .gte('kickoff',from.toISOString())
+    .lte('kickoff',to.toISOString())
+    .order('kickoff',{ascending:true})
+  if(fixtureError) throw fixtureError
+  const fixtureRows=fixtures??[]
+  const ids=fixtureRows.map((f:any)=>f.id)
+  const contexts:any[]=[]
+  for(const batch of chunks(ids)){
+    const {data,error}=await supabase.from('manual_match_context').select('fixture_id,referee_name,referee_confirmed').in('fixture_id',batch)
+    if(error) throw error
+    contexts.push(...(data??[]))
+  }
+  const confirmed=new Set(contexts.filter((c:any)=>c.referee_confirmed&&String(c.referee_name??'').trim()).map((c:any)=>c.fixture_id))
+  const targets=fixtureRows.filter((f:any)=>confirmed.has(f.id))
+  const results:any[]=[]
+  for(const fixture of targets as any[]){
+    try{results.push(await reconcileFixtureReferee(supabase,fixture.id))}
+    catch(error){results.push({fixtureId:fixture.id,matched:false,error:error instanceof Error?error.message:String(error)})}
+  }
+  return new Response(JSON.stringify({
+    ok:true,
+    checked:targets.length,
+    matched:results.filter((r)=>r.matched).length,
+    changed:results.filter((r)=>r.changed).length,
+    errors:results.filter((r)=>r.error).length,
+    noProcessingCap:true,
+    lookaheadDays:7,
+    results,
+  }),{headers:{'content-type':'application/json','cache-control':'no-store'}})
+}
