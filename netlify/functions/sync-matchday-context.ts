@@ -1,11 +1,14 @@
 import { createClient } from '@supabase/supabase-js'
 
-export const config = { schedule: '*/15 * * * *' }
+// Hourly master pre-match intelligence scan. It covers every fixture EVE shows in
+// the actionable four-day window, but only triggers model work when new material
+// information arrives or a confirmed referee still needs a usable profile.
+export const config = { schedule: '0 * * * *' }
 
-const SOURCE = 'fotmob-matchday-auto'
-const LOOKAHEAD_MINUTES = 180
-const LOOKBACK_MINUTES = 150
-const MAX_FIXTURES = 24
+const SOURCE = 'fotmob-matchday-hourly'
+const LOOKAHEAD_MINUTES = 4 * 24 * 60
+const LOOKBACK_MINUTES = 180
+const MAX_FIXTURES = 120
 
 function env(name:string){ const value=process.env[name]; if(!value) throw new Error(`Missing required environment variable: ${name}`); return value }
 function clean(value:string){ return value.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim().replace(/\s+/g,' ') }
@@ -50,7 +53,7 @@ async function fetchDetails(matchId:string){
   let last='FotMob match details failed'
   for(const url of urls){
     try{
-      const response=await fetch(url,{headers:{accept:'application/json,text/plain,*/*','user-agent':'Mozilla/5.0 EVE-Football-Scanner/0.8 matchday-auto-ref'}})
+      const response=await fetch(url,{headers:{accept:'application/json,text/plain,*/*','user-agent':'Mozilla/5.0 EVE-Football-Scanner/0.9 hourly-prematch'}})
       if(!response.ok){ last=`${response.status} ${response.statusText}`; if(response.status===429) await sleep(1200); continue }
       const body=await response.json()
       if(body&&typeof body==='object') return body
@@ -203,7 +206,7 @@ export default async(request?:Request)=>{
   const requestedFixtureId=request?new URL(request.url).searchParams.get('fixture_id'):null
   const horizon=new Date(now.getTime()+LOOKAHEAD_MINUTES*60000)
   const floor=new Date(now.getTime()-LOOKBACK_MINUTES*60000)
-  const {data:run}=await supabase.from('source_sync_runs').insert({source:SOURCE,job_name:'matchday-auto-sync',status:'running'}).select('id').single()
+  const {data:run}=await supabase.from('source_sync_runs').insert({source:SOURCE,job_name:'hourly-pre-match-intelligence',status:'running'}).select('id').single()
 
   try{
     let query=supabase.from('fixtures')
@@ -225,7 +228,7 @@ export default async(request?:Request)=>{
     }
 
     const results:any[]=[]
-    let changed=0,lineupsImported=0,refsImported=0,reanalysisTriggered=0
+    let changed=0,lineupsImported=0,refsImported=0,reanalysisTriggered=0,profileRetries=0
     for(const fixtureRaw of fixtures??[]){
       const fixture=fixtureRaw as Fixture
       const previous=contextMap.get(fixture.id)??{}
@@ -245,24 +248,31 @@ export default async(request?:Request)=>{
         if(fullLineups&&lineupChanged){ if(await importOfficialLineups(supabase,fixture,lineups.home,lineups.away)) lineupsImported+=1 }
 
         const materialChanged=refChanged||refResolution.fixtureChanged||lineupChanged
+        const refereeNeedsProfile=Boolean(refName)&&Number(refResolution.profileSample??0)<3
         if(materialChanged){
           changed+=1
           const {error:contextError}=await supabase.from('manual_match_context').upsert({fixture_id:fixture.id,referee_name:refName||previous.referee_name||null,referee_confirmed:Boolean(refName)||Boolean(previous.referee_confirmed),lineups_confirmed:fullLineups||Boolean(previous.lineups_confirmed),confirmed_at:new Date().toISOString(),updated_at:new Date().toISOString()},{onConflict:'fixture_id'})
           if(contextError) throw contextError
+        }
+        // New context must immediately alter the model. If the official referee is
+        // known but his usable profile has not arrived yet, retry the enrichment on
+        // each hourly pass until EVE can safely use it.
+        if(materialChanged||refereeNeedsProfile){
+          if(refereeNeedsProfile&&!materialChanged) profileRetries+=1
           if(await triggerReanalysis(request,fixture.id)) reanalysisTriggered+=1
         }
 
-        results.push({fixtureId:fixture.id,kickoff:fixture.kickoff,referee:refName||null,refereeStoredAs:refResolution.storedName,refereeProfileMatched:refResolution.profileMatched,refereeProfileSample:refResolution.profileSample,homeStarters:lineups.home.length,awayStarters:lineups.away.length,schema:lineups.schema,changed:materialChanged,status:fullLineups?(lineupChanged?'official_lineups_updated':'official_lineups_confirmed'):refName?'referee_found_waiting_lineups':'awaiting_matchday_data'})
+        results.push({fixtureId:fixture.id,kickoff:fixture.kickoff,referee:refName||null,refereeStoredAs:refResolution.storedName,refereeProfileMatched:refResolution.profileMatched,refereeProfileSample:refResolution.profileSample,homeStarters:lineups.home.length,awayStarters:lineups.away.length,schema:lineups.schema,changed:materialChanged,refereeProfileRetry:refereeNeedsProfile,status:fullLineups?(lineupChanged?'official_lineups_updated':'official_lineups_confirmed'):refName?'referee_found_waiting_lineups':'awaiting_pre_match_data'})
       }catch(error){ results.push({fixtureId:fixture.id,kickoff:fixture.kickoff,status:'error',error:error instanceof Error?error.message:String(error)}) }
-      await sleep(130)
+      await sleep(100)
     }
 
     const errors=results.filter((r)=>r.status==='error').length
-    const summary={fixturesChecked:fixtures?.length??0,changed,lineupsImported,refsImported,reanalysisTriggered,errors,lookaheadMinutes:LOOKAHEAD_MINUTES,lookbackMinutes:LOOKBACK_MINUTES,results:results.slice(0,24)}
+    const summary={fixturesChecked:fixtures?.length??0,changed,lineupsImported,refsImported,reanalysisTriggered,profileRetries,errors,lookaheadMinutes:LOOKAHEAD_MINUTES,lookbackMinutes:LOOKBACK_MINUTES,results:results.slice(0,120)}
     if(run?.id) await supabase.from('source_sync_runs').update({status:errors?'partial':'success',rows_upserted:lineupsImported*22+refsImported,finished_at:new Date().toISOString(),error_message:JSON.stringify(summary).slice(0,5000)}).eq('id',run.id)
-    return new Response(JSON.stringify({ok:true,...summary,note:'Official XI/referee data is checked every 15 minutes. Confirmed referees are reconciled to EVE historical referee identities when possible so their rolling card/foul profile can be used immediately.'}),{headers:{'content-type':'application/json'}})
+    return new Response(JSON.stringify({ok:true,...summary,note:'EVE checks every supported fixture in the next four days once per hour for newly available pre-match intelligence. A new referee, referee profile or official XI immediately triggers fixture re-analysis, calibration and Combo Lab refresh. This workflow does not poll bookmaker odds.'}),{headers:{'content-type':'application/json','cache-control':'no-store'}})
   }catch(error){
     if(run?.id) await supabase.from('source_sync_runs').update({status:'failed',finished_at:new Date().toISOString(),error_message:error instanceof Error?error.message:String(error)}).eq('id',run.id)
-    return new Response(JSON.stringify({ok:false,error:error instanceof Error?error.message:String(error)}),{status:500,headers:{'content-type':'application/json'}})
+    return new Response(JSON.stringify({ok:false,error:error instanceof Error?error.message:String(error)}),{status:500,headers:{'content-type':'application/json','cache-control':'no-store'}})
   }
 }
