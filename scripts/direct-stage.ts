@@ -9,6 +9,7 @@ import runExpanded from '../netlify/functions/run-expanded-markets-safe'
 import refineRefs from '../netlify/functions/refine-referee-intelligence-uncapped'
 import applyCalibration from '../netlify/functions/apply-calibration'
 import applyExpandedCalibration from '../netlify/functions/apply-expanded-calibration'
+import publishCalibratedSurfaces from '../netlify/functions/publish-calibrated-surfaces'
 import runCombos from '../netlify/functions/run-combos-safe'
 import syncResults from '../netlify/functions/sync-fotmob-results'
 import settleResults from '../netlify/functions/settle-results'
@@ -68,8 +69,9 @@ async function main(){
     const parsed=await unwrap('UNCAPPED CONFIRMED REFEREE INTELLIGENCE',await refineRefs())
     failOnReportedErrors('UNCAPPED CONFIRMED REFEREE INTELLIGENCE',parsed)
   }
-  else if(stage==='cal-core') await unwrap('CORE CALIBRATION AND PUBLICATION',await applyCalibration())
-  else if(stage==='cal-expanded') await unwrap('EXPANDED CALIBRATION AND PUBLICATION',await applyExpandedCalibration())
+  else if(stage==='cal-core') await unwrap('CORE CALIBRATION',await applyCalibration())
+  else if(stage==='cal-expanded') await unwrap('EXPANDED CALIBRATION',await applyExpandedCalibration())
+  else if(stage==='publish') await unwrap('ATOMIC PUBLICATION OF CALIBRATED SURFACES',await publishCalibratedSurfaces())
   else if(stage==='combos') await unwrap('FRESH CALIBRATED COMBO LAB REBUILD',await runCombos(new Request('https://eve.github/run-combos')))
   else if(stage==='results'){
     const sync=await unwrap('FOTMOB RESULT REFRESH',await syncResults())
