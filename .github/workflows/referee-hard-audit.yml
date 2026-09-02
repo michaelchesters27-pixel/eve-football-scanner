@@ -1,0 +1,32 @@
+name: EVE referee hard audit
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/referee-hard-audit.yml'
+      - 'netlify/functions/referee-audit.ts'
+      - 'netlify/functions/_shared/referee-intelligence.ts'
+      - 'netlify/functions/_shared/fotmob-referee-profile.ts'
+      - 'netlify/functions/_shared/referee-reconcile.ts'
+
+env:
+  SUPABASE_URL: https://hfmaofmvsmqbxgrwrjqf.supabase.co
+  SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+jobs:
+  hard-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --no-audit --no-fund
+      - name: Verify Supabase credentials
+        run: test -n "$SUPABASE_SERVICE_ROLE_KEY"
+      - name: Run hard referee audit
+        env:
+          EVE_STAGE: audit
+        run: npx --yes tsx@4.20.5 scripts/direct-stage.ts
