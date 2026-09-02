@@ -1,14 +1,12 @@
 import { createClient } from '@supabase/supabase-js'
 import { buildRefereeIntelligence, loadBestRefereeProfile } from './_shared/referee-intelligence'
 import { reconcileFixtureReferee } from './_shared/referee-reconcile'
-import applyCoreCalibration from './apply-calibration'
-import applyExpandedCalibration from './apply-expanded-calibration'
 
-// Safety-net model refresh after the hourly context/referee and scanner jobs.
 export const config={schedule:'40 * * * *'}
 
 function env(name:string){const value=process.env[name];if(!value) throw new Error(`Missing required environment variable: ${name}`);return value}
 function clamp(value:number,min=0,max=100){return Math.max(min,Math.min(max,value))}
+function chunks<T>(items:T[],size=100){const out:T[][]=[];for(let i=0;i<items.length;i+=size)out.push(items.slice(i,i+size));return out}
 
 type Evidence={key:string;label?:string;display?:string;score:number}
 type Snapshot={id:string;model_version:string;selection_key:string;data_quality:number;evidence:any;features:any}
@@ -42,16 +40,27 @@ function contextFor(snapshot:Snapshot):'home'|'away'|'match'{
   return 'match'
 }
 
-export async function refineFixtureRefereeIntelligence(supabase:ReturnType<typeof createClient>,fixtureId:string){
+export async function refineFixtureRefereeIntelligence(
+  supabase:ReturnType<typeof createClient>,
+  fixtureId:string,
+  requestedModelVersion?:string|null,
+){
+  const modelVersions=requestedModelVersion&&CONFIG[requestedModelVersion]?[requestedModelVersion]:Object.keys(CONFIG)
   let {data:fixture,error:fixtureError}=await supabase.from('fixtures').select('id,referee_id,kickoff,status').eq('id',fixtureId).maybeSingle()
   if(fixtureError) throw fixtureError
   if(!fixture) return {fixtureId,refined:0,reason:'Fixture not found'}
 
+  const {data:context,error:contextError}=await supabase.from('manual_match_context')
+    .select('referee_name,referee_confirmed')
+    .eq('fixture_id',fixtureId)
+    .maybeSingle()
+  if(contextError) throw contextError
+  if(!context?.referee_confirmed||!String(context.referee_name??'').trim()){
+    return {fixtureId,refined:0,reason:'Referee not explicitly confirmed'}
+  }
+
   let reconciliation:any=null
   let profile=fixture.referee_id?await loadBestRefereeProfile(supabase,fixture.referee_id):null
-  // Reconciliation/hydration is comparatively expensive. Only invoke it when the
-  // fixture does not already have a usable profile; the hourly referee job is
-  // responsible for routine identity maintenance.
   if(!profile||Number(profile.matches_sample??0)<3){
     try{
       reconciliation=await reconcileFixtureReferee(supabase,fixtureId)
@@ -65,11 +74,11 @@ export async function refineFixtureRefereeIntelligence(supabase:ReturnType<typeo
   if(!fixture?.referee_id) return {fixtureId,refined:0,reason:'No linked referee',reconciliation}
   if(!profile||Number(profile.matches_sample??0)<3) return {fixtureId,refined:0,reason:'No usable referee profile',reconciliation}
 
-  const keys=[...new Set(Object.values(CONFIG).flatMap((x)=>x.keys))]
+  const keys=[...new Set(modelVersions.flatMap((version)=>CONFIG[version].keys))]
   const {data:snapshots,error:snapshotError}=await supabase.from('feature_snapshots')
     .select('id,model_version,selection_key,data_quality,evidence,features')
     .eq('fixture_id',fixtureId)
-    .in('model_version',Object.keys(CONFIG))
+    .in('model_version',modelVersions)
     .in('selection_key',keys)
   if(snapshotError) throw snapshotError
 
@@ -110,34 +119,53 @@ export async function refineFixtureRefereeIntelligence(supabase:ReturnType<typeo
     details.push({snapshotId:snapshot.id,model:snapshot.model_version,selectionKey:snapshot.selection_key,confidence,refereeScore:intel.score,reliabilityPct:intel.reliabilityPct,sample:intel.sample,sources:intel.sources})
   }
 
-  return {fixtureId,refined,profile,reconciliation,details}
+  return {fixtureId,refined,modelVersions,profile,reconciliation,details}
 }
 
 export default async(request?:Request)=>{
   const supabase=createClient(env('SUPABASE_URL'),env('SUPABASE_SERVICE_ROLE_KEY'),{auth:{persistSession:false,autoRefreshToken:false}})
-  const requestedFixtureId=request?new URL(request.url).searchParams.get('fixture_id'):null
+  const url=request?new URL(request.url):null
+  const requestedFixtureId=url?.searchParams.get('fixture_id')??null
+  const requestedModelVersion=url?.searchParams.get('model_version')??null
   let fixtureIds:string[]=[]
   if(requestedFixtureId){
     fixtureIds=[requestedFixtureId]
   }else{
-    const now=new Date(),horizon=new Date(now.getTime()+4*86400000)
-    const {data,error}=await supabase.from('fixtures').select('id').in('status',['scheduled','live']).not('referee_id','is',null).gte('kickoff',new Date(now.getTime()-3*3600000).toISOString()).lte('kickoff',horizon.toISOString()).order('kickoff',{ascending:true}).limit(120)
+    const now=new Date(),horizon=new Date(now.getTime()+7*86400000)
+    const {data,error}=await supabase.from('fixtures')
+      .select('id')
+      .in('status',['scheduled','live'])
+      .gte('kickoff',new Date(now.getTime()-3*3600000).toISOString())
+      .lte('kickoff',horizon.toISOString())
+      .order('kickoff',{ascending:true})
     if(error) throw error
-    fixtureIds=(data??[]).map((x:any)=>x.id)
+    const allIds=(data??[]).map((x:any)=>x.id)
+    const contexts:any[]=[]
+    for(const batch of chunks(allIds)){
+      const {data:contextRows,error:contextError}=await supabase.from('manual_match_context')
+        .select('fixture_id,referee_name,referee_confirmed')
+        .in('fixture_id',batch)
+      if(contextError) throw contextError
+      contexts.push(...(contextRows??[]))
+    }
+    const confirmed=new Set(contexts.filter((c:any)=>c.referee_confirmed&&String(c.referee_name??'').trim()).map((c:any)=>c.fixture_id))
+    fixtureIds=allIds.filter((id:string)=>confirmed.has(id))
   }
 
   const results:any[]=[]
   let refined=0
   for(const fixtureId of fixtureIds){
-    try{const result=await refineFixtureRefereeIntelligence(supabase,fixtureId);results.push(result);refined+=Number(result.refined??0)}
+    try{const result=await refineFixtureRefereeIntelligence(supabase,fixtureId,requestedModelVersion);results.push(result);refined+=Number(result.refined??0)}
     catch(error){results.push({fixtureId,refined:0,error:error instanceof Error?error.message:String(error)})}
   }
 
-  let calibration:any=null
-  if(!requestedFixtureId&&refined>0){
-    const core=await applyCoreCalibration();const expanded=await applyExpandedCalibration()
-    calibration={core:core.ok?await core.json():{ok:false,error:await core.text()},expanded:expanded.ok?await expanded.json():{ok:false,error:await expanded.text()}}
-  }
-
-  return new Response(JSON.stringify({ok:true,checked:fixtureIds.length,refined,calibration,results,note:'Hourly safety-net refresh for linked referee intelligence across EVE’s next-four-day actionable window.'}),{headers:{'content-type':'application/json','cache-control':'no-store'}})
+  return new Response(JSON.stringify({
+    ok:true,checked:fixtureIds.length,refined,modelVersion:requestedModelVersion??'all',
+    errors:results.filter((r)=>r.error).length,
+    calibrationPerformedHere:false,
+    noProcessingCap:true,
+    lookaheadDays:7,
+    results,
+    note:'Referee refinement only. Calibration/publication belongs exclusively to dedicated downstream stages.',
+  }),{headers:{'content-type':'application/json','cache-control':'no-store'}})
 }
