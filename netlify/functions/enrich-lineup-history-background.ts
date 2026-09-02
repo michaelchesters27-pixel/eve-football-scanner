@@ -2,8 +2,10 @@ import { createClient } from '@supabase/supabase-js'
 import { loadFixturePlayerHistory } from './_shared/player-history'
 import { loadConfirmedStarterFormCache } from './_shared/player-form-cache'
 import runExpandedMarkets from './run-expanded-markets'
+import applyCoreCalibration from './apply-calibration'
 import applyExpandedCalibration from './apply-expanded-calibration'
 import runCombos from './run-combos'
+import { refineFixtureRefereeIntelligence } from './refine-referee-intelligence'
 
 function env(name:string){ const v=process.env[name]; if(!v) throw new Error(`Missing required environment variable: ${name}`); return v }
 function clean(v:string){ return v.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim().replace(/\s+/g,' ') }
@@ -43,22 +45,29 @@ export default async(request:Request)=>{
   const u=new URL(request.url)
   u.search=`?fixture_id=${encodeURIComponent(fixtureId)}`
 
-  // Keep mapping whatever can be linked to EVE's finished-fixture history.
   const sync=await loadFixturePlayerHistory(supabase,fixtureId,10)
   const relink=await relinkManualPlayers(supabase,fixtureId)
-
-  // Then fill a fixture-scoped 10-appearance cache directly from each confirmed
-  // FotMob starter. This avoids treating a missing historical fixture mapping as
-  // zero player form and gives transferred/newly-mapped teams usable XI depth.
   const formCache=await loadConfirmedStarterFormCache(supabase,fixtureId,10)
 
+  // Rebuild expanded markets first so the newest XI/referee context exists, then
+  // replace the old yellow-only referee term in BOTH core cards and expanded
+  // match-cards with EVE's full, reliability-shrunk referee intelligence bundle.
   const expandedResponse=await runExpandedMarkets(new Request(u.toString()))
   if(!expandedResponse.ok) throw new Error(`Expanded re-analysis failed: ${await expandedResponse.text()}`)
   const expanded=await expandedResponse.json()
 
-  const calibrationResponse=await applyExpandedCalibration()
-  if(!calibrationResponse.ok) throw new Error(`Calibration refresh failed: ${await calibrationResponse.text()}`)
-  const calibration=await calibrationResponse.json()
+  const refereeRefinement=await refineFixtureRefereeIntelligence(supabase,fixtureId)
+
+  // A referee can arrive hours after the morning scanner. Re-apply both calibrated
+  // publication gates immediately after the referee refinement so Best Bets and
+  // Market Lab cannot remain stale until the following day.
+  const coreCalibrationResponse=await applyCoreCalibration()
+  if(!coreCalibrationResponse.ok) throw new Error(`Core calibration refresh failed: ${await coreCalibrationResponse.text()}`)
+  const coreCalibration=await coreCalibrationResponse.json()
+
+  const expandedCalibrationResponse=await applyExpandedCalibration()
+  if(!expandedCalibrationResponse.ok) throw new Error(`Expanded calibration refresh failed: ${await expandedCalibrationResponse.text()}`)
+  const expandedCalibration=await expandedCalibrationResponse.json()
 
   const comboResponse=await runCombos(new Request(u.toString()))
   if(!comboResponse.ok) throw new Error(`Combo refresh failed: ${await comboResponse.text()}`)
@@ -69,7 +78,7 @@ export default async(request:Request)=>{
     source:'eve-player-intelligence',
     job_name:'lineup-history-enrichment',
     status,
-    rows_upserted:Number(sync?.stats??0)+Number(formCache?.cachedPlayers??0),
+    rows_upserted:Number(sync?.stats??0)+Number(formCache?.cachedPlayers??0)+Number(refereeRefinement?.refined??0),
     started_at:startedAt,
     finished_at:new Date().toISOString(),
     error_message:JSON.stringify({
@@ -77,10 +86,12 @@ export default async(request:Request)=>{
       mappedHistory:sync,
       formCache,
       relink,
+      refereeRefinement,
       expanded,
-      calibrationPublished:calibration?.totalPublished??null,
+      coreCalibrationPublished:coreCalibration?.totalPublished??null,
+      expandedCalibrationPublished:expandedCalibration?.totalPublished??null,
       comboWritten:combo?.written??null,
-      rule:'XI form is only considered usable after at least 5 appearances; target depth is 10.',
+      rule:'Confirmed referee intelligence and XI form are applied before final calibrated publication. XI form needs at least 5 appearances; referee history needs at least 3 appointments.',
     }).slice(0,5000),
   })
 }
