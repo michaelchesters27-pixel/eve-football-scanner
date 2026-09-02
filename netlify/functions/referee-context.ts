@@ -60,6 +60,6 @@ export default async(request:Request)=>{
     refereeModel:{score:intel.score,reliabilityPct:intel.reliabilityPct,components:intel.components,display:intel.display},
     tendency:tendency(intel.score,intel.usable),
     sampleLabel:sampleLabel(matches),
-    modelUse:'EVE merges safe referee sources and uses yellows, fouls, reds, penalties and home/away card tendency as one reliability-shrunk referee input for card markets. Missing fields stay missing; they are never treated as zero.',
+    modelUse:'EVE merges safe referee sources. Yellows, fouls, reds and home/away card tendency can influence the reliability-shrunk card score. Penalties are still pulled and displayed but remain diagnostic until equivalent walk-forward history exists. Missing fields stay missing; they are never treated as zero.',
   }),{headers:{'content-type':'application/json','cache-control':'no-store'}})
 }
