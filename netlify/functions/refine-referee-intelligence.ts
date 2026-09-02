@@ -4,7 +4,8 @@ import { reconcileFixtureReferee } from './_shared/referee-reconcile'
 import applyCoreCalibration from './apply-calibration'
 import applyExpandedCalibration from './apply-expanded-calibration'
 
-export const config={schedule:'50 5 * * *'}
+// Safety-net model refresh after the hourly context/referee reconciliation jobs.
+export const config={schedule:'20 * * * *'}
 
 function env(name:string){const value=process.env[name];if(!value) throw new Error(`Missing required environment variable: ${name}`);return value}
 function clamp(value:number,min=0,max=100){return Math.max(min,Math.min(max,value))}
@@ -49,7 +50,7 @@ export async function refineFixtureRefereeIntelligence(supabase:ReturnType<typeo
   let reconciliation:any=null
   let profile=fixture.referee_id?await loadBestRefereeProfile(supabase,fixture.referee_id):null
   // Reconciliation/hydration is comparatively expensive. Only invoke it when the
-  // fixture does not already have a usable profile; the 15-minute referee job is
+  // fixture does not already have a usable profile; the hourly referee job is
   // responsible for routine identity maintenance.
   if(!profile||Number(profile.matches_sample??0)<3){
     try{
@@ -119,8 +120,8 @@ export default async(request?:Request)=>{
   if(requestedFixtureId){
     fixtureIds=[requestedFixtureId]
   }else{
-    const now=new Date(),horizon=new Date(now.getTime()+7*86400000)
-    const {data,error}=await supabase.from('fixtures').select('id').in('status',['scheduled','live']).not('referee_id','is',null).gte('kickoff',new Date(now.getTime()-3*3600000).toISOString()).lte('kickoff',horizon.toISOString()).order('kickoff',{ascending:true}).limit(80)
+    const now=new Date(),horizon=new Date(now.getTime()+4*86400000)
+    const {data,error}=await supabase.from('fixtures').select('id').in('status',['scheduled','live']).not('referee_id','is',null).gte('kickoff',new Date(now.getTime()-3*3600000).toISOString()).lte('kickoff',horizon.toISOString()).order('kickoff',{ascending:true}).limit(120)
     if(error) throw error
     fixtureIds=(data??[]).map((x:any)=>x.id)
   }
@@ -138,5 +139,5 @@ export default async(request?:Request)=>{
     calibration={core:core.ok?await core.json():{ok:false,error:await core.text()},expanded:expanded.ok?await expanded.json():{ok:false,error:await expanded.text()}}
   }
 
-  return new Response(JSON.stringify({ok:true,checked:fixtureIds.length,refined,calibration,results}),{headers:{'content-type':'application/json','cache-control':'no-store'}})
+  return new Response(JSON.stringify({ok:true,checked:fixtureIds.length,refined,calibration,results,note:'Hourly safety-net refresh for linked referee intelligence across EVE’s next-four-day actionable window.'}),{headers:{'content-type':'application/json','cache-control':'no-store'}})
 }
