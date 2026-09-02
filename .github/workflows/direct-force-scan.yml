@@ -1,37 +1,134 @@
-name: EVE direct force scan
+name: EVE hourly direct scan
 
 on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 * * * *'
   push:
     paths:
       - '.github/workflows/direct-force-scan.yml'
-  workflow_dispatch:
+      - 'scripts/direct-stage.ts'
+
+concurrency:
+  group: eve-hourly-direct-scan
+  cancel-in-progress: false
+
+env:
+  SUPABASE_URL: https://hfmaofmvsmqbxgrwrjqf.supabase.co
+  SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
 jobs:
-  force-scan:
+  match-intelligence:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      SUPABASE_URL: https://hfmaofmvsmqbxgrwrjqf.supabase.co
-      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+    timeout-minutes: 15
     steps:
-      - name: Checkout EVE
-        uses: actions/checkout@v4
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - run: npm install --no-audit --no-fund
+      - name: Verify Supabase credentials
+        run: test -n "$SUPABASE_SERVICE_ROLE_KEY"
+      - name: Refresh fixtures
+        env: { EVE_STAGE: fixtures }
+        run: npx --yes tsx@4.20.5 scripts/direct-stage.ts
+      - name: Import referee and lineup intelligence
+        env: { EVE_STAGE: match-intel }
+        run: npx --yes tsx@4.20.5 scripts/direct-stage.ts
+      - name: Second-source referee fallback
+        env: { EVE_STAGE: ref-fallback }
+        run: npx --yes tsx@4.20.5 scripts/direct-stage.ts
+      - name: Reconcile referee profiles
+        env: { EVE_STAGE: ref-reconcile }
+        run: npx --yes tsx@4.20.5 scripts/direct-stage.ts
 
-      - name: Install dependencies
-        run: npm install --no-audit --no-fund
+  core-model:
+    needs: match-intelligence
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - run: npm install --no-audit --no-fund
+      - name: Rebuild Best Bets
+        env: { EVE_STAGE: core }
+        run: npx --yes tsx@4.20.5 scripts/direct-stage.ts
 
-      - name: Verify direct-scan credentials
-        shell: bash
-        run: |
-          if [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then echo 'MISSING_SECRET: SUPABASE_SERVICE_ROLE_KEY'; exit 2; fi
-          if [ -z "$ODDS_API_KEY" ]; then echo 'INFO: ODDS_API_KEY not set in GitHub; price refresh will be skipped.'; fi
-          echo 'Direct scan credentials available.'
+  expanded-model:
+    needs: match-intelligence
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - run: npm install --no-audit --no-fund
+      - name: Rebuild Market Lab
+        env: { EVE_STAGE: expanded }
+        run: npx --yes tsx@4.20.5 scripts/direct-stage.ts
 
-      - name: Force full EVE scan without Netlify
-        run: npx --yes tsx@4.20.5 scripts/force-hourly-scan.ts
+  referee-intelligence:
+    needs: [core-model, expanded-model]
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - run: npm install --no-audit --no-fund
+      - name: Apply full referee intelligence
+        env: { EVE_STAGE: refine-ref }
+        run: npx --yes tsx@4.20.5 scripts/direct-stage.ts
+
+  core-calibration:
+    needs: referee-intelligence
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - run: npm install --no-audit --no-fund
+      - name: Calibrate Best Bets
+        env: { EVE_STAGE: cal-core }
+        run: npx --yes tsx@4.20.5 scripts/direct-stage.ts
+
+  expanded-calibration:
+    needs: referee-intelligence
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - run: npm install --no-audit --no-fund
+      - name: Calibrate Market Lab
+        env: { EVE_STAGE: cal-expanded }
+        run: npx --yes tsx@4.20.5 scripts/direct-stage.ts
+
+  combo-lab:
+    needs: [core-calibration, expanded-calibration]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - run: npm install --no-audit --no-fund
+      - name: Rebuild Combo Lab
+        env: { EVE_STAGE: combos }
+        run: npx --yes tsx@4.20.5 scripts/direct-stage.ts
+
+  final-audit:
+    needs: combo-lab
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - run: npm install --no-audit --no-fund
+      - name: Verify referee coverage and model propagation
+        env: { EVE_STAGE: audit }
+        run: npx --yes tsx@4.20.5 scripts/direct-stage.ts
