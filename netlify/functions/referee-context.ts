@@ -1,14 +1,15 @@
 import { createClient } from '@supabase/supabase-js'
+import { buildRefereeIntelligence, loadBestRefereeProfile } from './_shared/referee-intelligence'
 
 function env(name:string){ const value=process.env[name]; if(!value) throw new Error(`Missing required environment variable: ${name}`); return value }
-function round1(value:number|null|undefined){ const n=Number(value); return Number.isFinite(n)?Math.round(n*10)/10:null }
-function round2(value:number|null|undefined){ const n=Number(value); return Number.isFinite(n)?Math.round(n*100)/100:null }
-function tendency(cards:number|null){
-  if(cards==null) return {level:'AWAITING HISTORY',impact:'Referee is confirmed, but EVE has not linked a usable historical referee sample yet.'}
-  if(cards>=5.2) return {level:'VERY CARD HEAVY',impact:'Raises the match-card expectation materially.'}
-  if(cards>=4.3) return {level:'CARD HEAVY',impact:'Raises the match-card expectation.'}
-  if(cards<=2.8) return {level:'LOW CARD',impact:'Lowers the match-card expectation.'}
-  return {level:'NORMAL RANGE',impact:'Close to neutral for the match-card model.'}
+function round1(value:number|null|undefined){ const n=Number(value); return value==null||!Number.isFinite(n)?null:Math.round(n*10)/10 }
+function round2(value:number|null|undefined){ const n=Number(value); return value==null||!Number.isFinite(n)?null:Math.round(n*100)/100 }
+function tendency(score:number|null,usable:boolean){
+  if(!usable||score==null) return {level:'AWAITING HISTORY',impact:'Referee is confirmed, but EVE has not linked a usable historical referee sample yet.'}
+  if(score>=62) return {level:'VERY CARD HEAVY',impact:'Full referee profile materially raises the card-market expectation.'}
+  if(score>=55) return {level:'CARD HEAVY',impact:'Full referee profile raises the card-market expectation.'}
+  if(score<=42) return {level:'LOW CARD',impact:'Full referee profile lowers the card-market expectation.'}
+  return {level:'NORMAL RANGE',impact:'Full referee profile is close to neutral for the card model.'}
 }
 function sampleLabel(matches:number){
   if(matches>=25) return 'STRONG SAMPLE'
@@ -29,16 +30,16 @@ export default async(request:Request)=>{
 
   const {data:manual}=await supabase.from('manual_match_context').select('referee_name,referee_confirmed').eq('fixture_id',fixtureId).maybeSingle()
   if(!fixture.referee_id){
-    return new Response(JSON.stringify({ok:true,confirmed:Boolean(manual?.referee_confirmed),name:manual?.referee_name??null,profile:null,tendency:tendency(null),sampleLabel:'NO USABLE SAMPLE'}),{headers:{'content-type':'application/json'}})
+    return new Response(JSON.stringify({ok:true,confirmed:Boolean(manual?.referee_confirmed),name:manual?.referee_name??null,profile:null,tendency:tendency(null,false),sampleLabel:'NO USABLE SAMPLE'}),{headers:{'content-type':'application/json'}})
   }
 
-  const [{data:referee},{data:profile}]=await Promise.all([
+  const [{data:referee},profile]=await Promise.all([
     supabase.from('referees').select('id,name,source_key').eq('id',fixture.referee_id).maybeSingle(),
-    supabase.from('referee_profiles').select('as_of_date,matches_sample,yellow_cards_per_match,red_cards_per_match,fouls_per_match,penalties_per_match,home_yellows_per_match,away_yellows_per_match,source').eq('referee_id',fixture.referee_id).order('as_of_date',{ascending:false}).limit(1).maybeSingle(),
+    loadBestRefereeProfile(supabase,fixture.referee_id),
   ])
-
-  const cards=profile?.yellow_cards_per_match==null?null:Number(profile.yellow_cards_per_match)
+  const intel=buildRefereeIntelligence(profile,'match')
   const matches=Number(profile?.matches_sample??0)
+
   return new Response(JSON.stringify({
     ok:true,
     confirmed:Boolean(manual?.referee_confirmed||referee?.id),
@@ -54,9 +55,11 @@ export default async(request:Request)=>{
       awayYellowsPerMatch:round2(profile.away_yellows_per_match),
       asOfDate:profile.as_of_date,
       source:profile.source,
+      sources:profile.sources??[],
     }:null,
-    tendency:tendency(cards),
+    refereeModel:{score:intel.score,reliabilityPct:intel.reliabilityPct,components:intel.components,display:intel.display},
+    tendency:tendency(intel.score,intel.usable),
     sampleLabel:sampleLabel(matches),
-    modelUse:'Referee history is used only in card-market analysis. It is one weighted input alongside recent team cards, home/away splits, season history, H2H and confirmed-XI card tendencies.',
+    modelUse:'EVE merges safe referee sources and uses yellows, fouls, reds, penalties and home/away card tendency as one reliability-shrunk referee input for card markets. Missing fields stay missing; they are never treated as zero.',
   }),{headers:{'content-type':'application/json','cache-control':'no-store'}})
 }
