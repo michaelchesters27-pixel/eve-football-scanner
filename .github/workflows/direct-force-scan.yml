@@ -8,6 +8,9 @@ on:
     paths:
       - '.github/workflows/direct-force-scan.yml'
       - 'scripts/direct-stage.ts'
+      - 'netlify/functions/pre-model-safety.ts'
+      - 'netlify/functions/canonicalize-fotmob-referees.ts'
+      - 'netlify/functions/system-hard-audit.ts'
       - 'netlify/functions/_shared/fotmob-referee-profile.ts'
       - 'netlify/functions/_shared/referee-reconcile.ts'
 
@@ -20,32 +23,78 @@ env:
   SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
 jobs:
-  match-intelligence:
+  fixture-refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
+        with: { node-version: '22' }
       - run: npm install --no-audit --no-fund
       - name: Verify Supabase credentials
         run: test -n "$SUPABASE_SERVICE_ROLE_KEY"
       - name: Refresh fixtures
         env: { EVE_STAGE: fixtures }
         run: npx --yes tsx@4.20.5 scripts/direct-stage.ts
-      - name: Import referee and lineup intelligence
+
+  context-intelligence:
+    needs: fixture-refresh
+    runs-on: ubuntu-latest
+    timeout-minutes: 14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - run: npm install --no-audit --no-fund
+      - id: primary
+        name: Import match intelligence
+        continue-on-error: true
         env: { EVE_STAGE: match-intel }
         run: npx --yes tsx@4.20.5 scripts/direct-stage.ts
-      - name: Second-source referee fallback
+      - id: canonical
+        name: Preserve exact FotMob referee IDs and stats
+        if: always()
+        continue-on-error: true
+        env: { EVE_STAGE: canonical-ref }
+        run: npx --yes tsx@4.20.5 scripts/direct-stage.ts
+      - id: fallback
+        name: Second-source referee fallback
+        if: always()
+        continue-on-error: true
         env: { EVE_STAGE: ref-fallback }
         run: npx --yes tsx@4.20.5 scripts/direct-stage.ts
-      - name: Reconcile referee profiles
+      - id: reconcile
+        name: Reconcile referee profiles
+        if: always()
+        continue-on-error: true
         env: { EVE_STAGE: ref-reconcile }
+        run: npx --yes tsx@4.20.5 scripts/direct-stage.ts
+      - name: Mark partial enrichment visibly
+        if: always()
+        shell: bash
+        run: |
+          echo "primary=${{ steps.primary.outcome }} canonical=${{ steps.canonical.outcome }} fallback=${{ steps.fallback.outcome }} reconcile=${{ steps.reconcile.outcome }}"
+          if [[ "${{ steps.primary.outcome }}" != "success" || "${{ steps.canonical.outcome }}" != "success" || "${{ steps.fallback.outcome }}" != "success" || "${{ steps.reconcile.outcome }}" != "success" ]]; then
+            echo "One or more optional intelligence stages failed. Core scanning may continue only through the safety gate."
+            exit 1
+          fi
+
+  pre-model-safety:
+    needs: [fixture-refresh, context-intelligence]
+    if: ${{ always() && needs.fixture-refresh.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - run: npm install --no-audit --no-fund
+      - name: Enforce referee and official-lineup invariants
+        env: { EVE_STAGE: safety }
         run: npx --yes tsx@4.20.5 scripts/direct-stage.ts
 
   core-model:
-    needs: match-intelligence
+    needs: pre-model-safety
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
@@ -53,12 +102,12 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: '22' }
       - run: npm install --no-audit --no-fund
-      - name: Rebuild Best Bets
+      - name: Rebuild Best Bets model
         env: { EVE_STAGE: core }
         run: npx --yes tsx@4.20.5 scripts/direct-stage.ts
 
   expanded-model:
-    needs: match-intelligence
+    needs: pre-model-safety
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
@@ -72,6 +121,7 @@ jobs:
 
   referee-intelligence:
     needs: [core-model, expanded-model]
+    if: ${{ always() && (needs.core-model.result == 'success' || needs.expanded-model.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
@@ -79,27 +129,29 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: '22' }
       - run: npm install --no-audit --no-fund
-      - name: Apply full referee intelligence
+      - name: Apply confirmed referee intelligence
         env: { EVE_STAGE: refine-ref }
         run: npx --yes tsx@4.20.5 scripts/direct-stage.ts
 
   core-calibration:
-    needs: referee-intelligence
+    needs: [core-model, referee-intelligence]
+    if: ${{ always() && needs.core-model.result == 'success' && needs.referee-intelligence.result == 'success' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: '22' }
       - run: npm install --no-audit --no-fund
-      - name: Calibrate Best Bets
+      - name: Calibrate and publish Best Bets
         env: { EVE_STAGE: cal-core }
         run: npx --yes tsx@4.20.5 scripts/direct-stage.ts
 
   expanded-calibration:
-    needs: referee-intelligence
+    needs: [expanded-model, referee-intelligence]
+    if: ${{ always() && needs.expanded-model.result == 'success' && needs.referee-intelligence.result == 'success' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -111,19 +163,7 @@ jobs:
 
   combo-lab:
     needs: [core-calibration, expanded-calibration]
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: '22' }
-      - run: npm install --no-audit --no-fund
-      - name: Rebuild Combo Lab
-        env: { EVE_STAGE: combos }
-        run: npx --yes tsx@4.20.5 scripts/direct-stage.ts
-
-  final-audit:
-    needs: combo-lab
+    if: ${{ always() && (needs.core-calibration.result == 'success' || needs.expanded-calibration.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
@@ -131,6 +171,29 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: '22' }
       - run: npm install --no-audit --no-fund
-      - name: Verify referee coverage and model propagation
+      - name: Rebuild Combo Lab from calibrated predictions
+        env: { EVE_STAGE: combos }
+        run: npx --yes tsx@4.20.5 scripts/direct-stage.ts
+
+  final-audit:
+    needs: [fixture-refresh, context-intelligence, pre-model-safety, core-calibration, expanded-calibration, combo-lab]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - run: npm install --no-audit --no-fund
+      - name: Run seven-day uncapped hard invariant audit
+        if: ${{ needs.fixture-refresh.result == 'success' && needs.pre-model-safety.result == 'success' }}
         env: { EVE_STAGE: audit }
         run: npx --yes tsx@4.20.5 scripts/direct-stage.ts
+      - name: Assert core publication pipeline completed
+        if: always()
+        shell: bash
+        run: |
+          echo "fixture=${{ needs.fixture-refresh.result }} context=${{ needs.context-intelligence.result }} safety=${{ needs.pre-model-safety.result }} coreCal=${{ needs.core-calibration.result }} expandedCal=${{ needs.expanded-calibration.result }} combo=${{ needs.combo-lab.result }}"
+          test "${{ needs.fixture-refresh.result }}" = "success"
+          test "${{ needs.pre-model-safety.result }}" = "success"
+          test "${{ needs.core-calibration.result }}" = "success"
