@@ -2,7 +2,10 @@ import { createClient } from '@supabase/supabase-js'
 import { reconcileActiveReferees } from './_shared/referee-reconcile'
 import { refineFixtureRefereeIntelligence } from './refine-referee-intelligence'
 
-export const config={schedule:'*/15 * * * *'}
+// Run shortly after the hourly match-context scan. This is deliberately hourly:
+// the scanner only needs another model refresh when the linked referee/profile
+// actually changes.
+export const config={schedule:'10 * * * *'}
 
 function env(name:string){const value=process.env[name];if(!value) throw new Error(`Missing required environment variable: ${name}`);return value}
 
@@ -18,6 +21,6 @@ export default async()=>{
   }
   return new Response(JSON.stringify({
     ok:true,...result,refreshed,
-    note:'Confirmed referee names are matched conservatively. When the linked referee or referee profile changes, EVE immediately refreshes full referee intelligence in live card predictions.',
-  }),{headers:{'content-type':'application/json'}})
+    note:'Every hour, confirmed referee names are reconciled conservatively. When the linked referee or referee profile changes, EVE immediately refreshes full referee intelligence in live card predictions.',
+  }),{headers:{'content-type':'application/json','cache-control':'no-store'}})
 }
