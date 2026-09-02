@@ -107,19 +107,22 @@ export function buildRefereeIntelligence(profile:RefereeProfile|null|undefined,c
   const sources=profile?.sources?.length?profile.sources:[String(profile?.source??'')].filter(Boolean)
   const components:RefereeComponent[]=[]
 
-  if(yellows!=null) components.push({key:'yellows',label:'Yellow cards',value:yellows,score:metricScore(yellows,4.0,11,32),weight:.48})
-  if(fouls!=null) components.push({key:'fouls',label:'Fouls',value:fouls,score:metricScore(fouls,24,1.8,24),weight:.18})
-  if(reds!=null) components.push({key:'reds',label:'Red cards',value:reds,score:metricScore(reds,.18,45,15),weight:.10})
-  if(penalties!=null) components.push({key:'penalties',label:'Penalties',value:penalties,score:metricScore(penalties,.25,30,12),weight:.05})
+  // Only referee dimensions that can be reconstructed in strict historical
+  // walk-forward testing may alter the live score. Penalties are still pulled,
+  // stored and displayed, but remain diagnostic until equivalent history exists.
+  if(yellows!=null) components.push({key:'yellows',label:'Yellow cards',value:yellows,score:metricScore(yellows,4.0,11,32),weight:.50})
+  if(fouls!=null) components.push({key:'fouls',label:'Fouls',value:fouls,score:metricScore(fouls,24,1.8,24),weight:.19})
+  if(reds!=null) components.push({key:'reds',label:'Red cards',value:reds,score:metricScore(reds,.18,45,15),weight:.11})
+  if(penalties!=null) components.push({key:'penalties',label:'Penalties · diagnostic',value:penalties,score:metricScore(penalties,.25,30,12),weight:0})
 
   if(context==='home'&&home!=null){
     const bias=away==null?0:home-away
-    components.push({key:'side',label:'Home-card tendency',value:home,score:clamp(metricScore(home,2.0,11,24)+bias*7,26,78),weight:.19})
+    components.push({key:'side',label:'Home-card tendency',value:home,score:clamp(metricScore(home,2.0,11,24)+bias*7,26,78),weight:.20})
   }else if(context==='away'&&away!=null){
     const bias=home==null?0:away-home
-    components.push({key:'side',label:'Away-card tendency',value:away,score:clamp(metricScore(away,2.0,11,24)+bias*7,26,78),weight:.19})
+    components.push({key:'side',label:'Away-card tendency',value:away,score:clamp(metricScore(away,2.0,11,24)+bias*7,26,78),weight:.20})
   }else if(context==='match'&&home!=null&&away!=null){
-    components.push({key:'homeAway',label:'Home/away total',value:home+away,score:metricScore(home+away,4.0,10,22),weight:.19})
+    components.push({key:'homeAway',label:'Home/away total',value:home+away,score:metricScore(home+away,4.0,10,22),weight:.20})
   }
 
   const weightUsed=components.reduce((sum,c)=>sum+c.weight,0)
@@ -134,12 +137,12 @@ export function buildRefereeIntelligence(profile:RefereeProfile|null|undefined,c
     yellows==null?null:`${yellows.toFixed(2)}Y`,
     fouls==null?null:`${fouls.toFixed(1)}F`,
     reds==null?null:`${reds.toFixed(3)}R`,
-    penalties==null?null:`${penalties.toFixed(3)}P`,
+    penalties==null?null:`${penalties.toFixed(3)}P*`,
     home==null&&away==null?null:`H/A ${home==null?'—':home.toFixed(2)}/${away==null?'—':away.toFixed(2)}`,
   ].filter(Boolean)
 
   return {
-    usable:sample>=3&&components.length>0,
+    usable:sample>=3&&components.some((c)=>c.weight>0),
     score:round(finalScore,1),
     rawScore:round(raw,1),
     reliabilityPct:round(reliability*100,1),
