@@ -4,8 +4,8 @@ import canonicalizeFotmobRefs from '../netlify/functions/canonicalize-fotmob-ref
 import syncSofascoreRefs from '../netlify/functions/sync-sofascore-referees'
 import reconcileRefs from '../netlify/functions/reconcile-referees-uncapped'
 import preModelSafety from '../netlify/functions/pre-model-safety'
-import runScanner from '../netlify/functions/run-scanner'
-import runExpanded from '../netlify/functions/run-expanded-markets'
+import runScanner from '../netlify/functions/run-scanner-safe'
+import runExpanded from '../netlify/functions/run-expanded-markets-safe'
 import refineRefs from '../netlify/functions/refine-referee-intelligence-uncapped'
 import applyCalibration from '../netlify/functions/apply-calibration'
 import applyExpandedCalibration from '../netlify/functions/apply-expanded-calibration'
@@ -62,14 +62,14 @@ async function main(){
     failOnReportedErrors('UNCAPPED CONFIRMED-REFEREE RECONCILIATION',parsed)
   }
   else if(stage==='safety') await unwrap('PRE-MODEL SAFETY GATE',await preModelSafety())
-  else if(stage==='core') await unwrap('CORE BEST BETS REBUILD',await runScanner())
-  else if(stage==='expanded') await unwrap('MARKET LAB REBUILD',await runExpanded(new Request('https://eve.github/run-expanded-markets')))
+  else if(stage==='core') await unwrap('STAGE CORE BEST BETS MODEL',await runScanner())
+  else if(stage==='expanded') await unwrap('STAGE MARKET LAB MODEL',await runExpanded(new Request('https://eve.github/run-expanded-markets')))
   else if(stage==='refine-ref'){
     const parsed=await unwrap('UNCAPPED CONFIRMED REFEREE INTELLIGENCE',await refineRefs())
     failOnReportedErrors('UNCAPPED CONFIRMED REFEREE INTELLIGENCE',parsed)
   }
-  else if(stage==='cal-core') await unwrap('CORE CALIBRATION',await applyCalibration())
-  else if(stage==='cal-expanded') await unwrap('EXPANDED CALIBRATION',await applyExpandedCalibration())
+  else if(stage==='cal-core') await unwrap('CORE CALIBRATION AND PUBLICATION',await applyCalibration())
+  else if(stage==='cal-expanded') await unwrap('EXPANDED CALIBRATION AND PUBLICATION',await applyExpandedCalibration())
   else if(stage==='combos') await unwrap('FRESH CALIBRATED COMBO LAB REBUILD',await runCombos(new Request('https://eve.github/run-combos')))
   else if(stage==='results'){
     const sync=await unwrap('FOTMOB RESULT REFRESH',await syncResults())
