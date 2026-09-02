@@ -1,6 +1,7 @@
 import { createClient } from '@supabase/supabase-js'
 import { loadFixturePlayerHistory } from './_shared/player-history'
 import { loadConfirmedStarterFormCache } from './_shared/player-form-cache'
+import runCoreScanner from './run-scanner'
 import runExpandedMarkets from './run-expanded-markets'
 import applyCoreCalibration from './apply-calibration'
 import applyExpandedCalibration from './apply-expanded-calibration'
@@ -36,6 +37,18 @@ async function relinkManualPlayers(supabase:ReturnType<typeof createClient>,fixt
   return {relinked}
 }
 
+async function ensureCoreSnapshots(supabase:ReturnType<typeof createClient>,fixtureId:string){
+  const {count,error}=await supabase.from('feature_snapshots').select('id',{count:'exact',head:true}).eq('fixture_id',fixtureId).eq('model_version','v0-research').in('selection_key',['home_cards_1_5','away_cards_1_5'])
+  if(error) throw error
+  if(Number(count??0)>=2) return {needed:false,generated:null}
+  // This edge case is rare: a fixture can arrive after the daily core run. Run the
+  // DB-only scanner once so matchday referee intelligence never has "nothing to
+  // refine". No Odds API credits are consumed by this scanner run.
+  const response=await runCoreScanner()
+  if(!response.ok) throw new Error(`Core scanner bootstrap failed: ${await response.text()}`)
+  return {needed:true,generated:await response.json()}
+}
+
 export default async(request:Request)=>{
   const fixtureId=new URL(request.url).searchParams.get('fixture_id')
   if(!fixtureId) throw new Error('fixture_id is required')
@@ -48,19 +61,14 @@ export default async(request:Request)=>{
   const sync=await loadFixturePlayerHistory(supabase,fixtureId,10)
   const relink=await relinkManualPlayers(supabase,fixtureId)
   const formCache=await loadConfirmedStarterFormCache(supabase,fixtureId,10)
+  const coreBootstrap=await ensureCoreSnapshots(supabase,fixtureId)
 
-  // Rebuild expanded markets first so the newest XI/referee context exists, then
-  // replace the old yellow-only referee term in BOTH core cards and expanded
-  // match-cards with EVE's full, reliability-shrunk referee intelligence bundle.
   const expandedResponse=await runExpandedMarkets(new Request(u.toString()))
   if(!expandedResponse.ok) throw new Error(`Expanded re-analysis failed: ${await expandedResponse.text()}`)
   const expanded=await expandedResponse.json()
 
   const refereeRefinement=await refineFixtureRefereeIntelligence(supabase,fixtureId)
 
-  // A referee can arrive hours after the morning scanner. Re-apply both calibrated
-  // publication gates immediately after the referee refinement so Best Bets and
-  // Market Lab cannot remain stale until the following day.
   const coreCalibrationResponse=await applyCoreCalibration()
   if(!coreCalibrationResponse.ok) throw new Error(`Core calibration refresh failed: ${await coreCalibrationResponse.text()}`)
   const coreCalibration=await coreCalibrationResponse.json()
@@ -86,6 +94,7 @@ export default async(request:Request)=>{
       mappedHistory:sync,
       formCache,
       relink,
+      coreBootstrap,
       refereeRefinement,
       expanded,
       coreCalibrationPublished:coreCalibration?.totalPublished??null,
