@@ -4,8 +4,8 @@ import { reconcileFixtureReferee } from './_shared/referee-reconcile'
 import applyCoreCalibration from './apply-calibration'
 import applyExpandedCalibration from './apply-expanded-calibration'
 
-// Safety-net model refresh after the hourly context/referee reconciliation jobs.
-export const config={schedule:'20 * * * *'}
+// Safety-net model refresh after the hourly context/referee and scanner jobs.
+export const config={schedule:'40 * * * *'}
 
 function env(name:string){const value=process.env[name];if(!value) throw new Error(`Missing required environment variable: ${name}`);return value}
 function clamp(value:number,min=0,max=100){return Math.max(min,Math.min(max,value))}
