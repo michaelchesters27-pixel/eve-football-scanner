@@ -89,8 +89,6 @@ export async function reconcileFixtureReferee(supabase:Supabase,fixtureId:string
 export async function reconcileActiveReferees(supabase:Supabase){
   const now=new Date()
   const from=new Date(now.getTime()-180*60000).toISOString()
-  // Match the scanner's actionable window: every supported fixture shown in the
-  // next four days can have its referee identity/profile linked before matchday.
   const to=new Date(now.getTime()+4*24*3600000).toISOString()
   const {data:fixtures,error}=await supabase.from('fixtures').select('id,referee_id').in('status',['scheduled','live']).gte('kickoff',from).lte('kickoff',to).order('kickoff',{ascending:true}).limit(120)
   if(error) throw error
@@ -111,8 +109,12 @@ export async function reconcileActiveReferees(supabase:Supabase){
       if(!result.matched) unmatched.push({fixture,officialName,position})
     }catch(error){results.push({fixtureId:fixture.id,matched:false,error:error instanceof Error?error.message:String(error)})}
   }
+
+  // Previous code only hydrated unmatched.slice(0,12). When those first twelve
+  // repeatedly failed, every referee after them was starved forever. The JSON-first
+  // hydrator is cheap enough to cover the complete actionable window safely.
   let hydratedAny=false
-  for(const item of unmatched.slice(0,12)){
+  for(const item of unmatched.slice(0,60)){
     try{
       const direct=await hydrateFixtureRefereeProfile(supabase,item.fixture.id,item.officialName)
       if(direct.hydrated){hydratedAny=true;results[item.position]={...results[item.position],directFotMob:true,direct}}
