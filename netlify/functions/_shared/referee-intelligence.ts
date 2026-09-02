@@ -52,9 +52,6 @@ export function mergeRefereeProfiles(rows:any[]):RefereeProfile|null{
   const valid=(rows??[]).filter((row:any)=>row&&Number(row.matches_sample??0)>=3)
   if(!valid.length) return null
   const latest=Math.max(...valid.map((row:any)=>dateMs(row.as_of_date)))
-  // Profiles are snapshots. Merge only recent snapshots of the SAME referee so a
-  // FotMob total profile can complement EVE-derived home/away splits without
-  // allowing an old/stale row to overwrite fresher information.
   const windowMs=14*86400000
   const eligible=valid.filter((row:any)=>latest-dateMs(row.as_of_date)<=windowMs)
   const sorted=[...eligible].sort((a:any,b:any)=>dateMs(b.as_of_date)-dateMs(a.as_of_date)||sourceRank(b.source)-sourceRank(a.source)||Number(b.matches_sample??0)-Number(a.matches_sample??0))
@@ -113,8 +110,6 @@ export function buildRefereeIntelligence(profile:RefereeProfile|null|undefined,c
   if(yellows!=null) components.push({key:'yellows',label:'Yellow cards',value:yellows,score:metricScore(yellows,4.0,11,32),weight:.48})
   if(fouls!=null) components.push({key:'fouls',label:'Fouls',value:fouls,score:metricScore(fouls,24,1.8,24),weight:.18})
   if(reds!=null) components.push({key:'reds',label:'Red cards',value:reds,score:metricScore(reds,.18,45,15),weight:.10})
-  // Penalties are deliberately low-weight because historic coverage is thinner;
-  // they are still ingested, retained and used rather than silently discarded.
   if(penalties!=null) components.push({key:'penalties',label:'Penalties',value:penalties,score:metricScore(penalties,.25,30,12),weight:.05})
 
   if(context==='home'&&home!=null){
@@ -131,7 +126,7 @@ export function buildRefereeIntelligence(profile:RefereeProfile|null|undefined,c
   const raw=weightUsed?components.reduce((sum,c)=>sum+c.score*c.weight,0)/weightUsed:50
   const sampleReliability=clamp(sample/15,0,1)
   const completeness=clamp(weightUsed,0,1)
-  const sourceReliability=sources.some((s)=>s==='fotmob-referee-page')?1:sources.some((s)=>s==='eve-derived')?.96:.90
+  const sourceReliability=sources.some((s)=>s==='fotmob-referee-page')?1:(sources.some((s)=>s==='eve-derived')?.96:.90)
   const reliability=sample>=3?sampleReliability*(.78+.22*completeness)*sourceReliability:0
   const finalScore=50+(raw-50)*reliability
 
