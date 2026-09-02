@@ -9,14 +9,20 @@ on:
       - '.github/workflows/direct-force-scan.yml'
       - 'scripts/direct-stage.ts'
       - 'netlify/functions/pre-model-safety.ts'
+      - 'netlify/functions/sync-matchday-context-safe.ts'
       - 'netlify/functions/canonicalize-fotmob-referees.ts'
+      - 'netlify/functions/reconcile-referees-uncapped.ts'
+      - 'netlify/functions/run-scanner-safe.ts'
+      - 'netlify/functions/run-expanded-markets-safe.ts'
+      - 'netlify/functions/refine-referee-intelligence-uncapped.ts'
+      - 'netlify/functions/run-combos-safe.ts'
       - 'netlify/functions/system-hard-audit.ts'
       - 'netlify/functions/_shared/fotmob-referee-profile.ts'
       - 'netlify/functions/_shared/referee-reconcile.ts'
 
 concurrency:
   group: eve-hourly-direct-scan
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   SUPABASE_URL: https://hfmaofmvsmqbxgrwrjqf.supabase.co
@@ -47,7 +53,7 @@ jobs:
         with: { node-version: '22' }
       - run: npm install --no-audit --no-fund
       - id: primary
-        name: Import match intelligence
+        name: Import match intelligence and sanitize immediately
         continue-on-error: true
         env: { EVE_STAGE: match-intel }
         run: npx --yes tsx@4.20.5 scripts/direct-stage.ts
@@ -64,7 +70,7 @@ jobs:
         env: { EVE_STAGE: ref-fallback }
         run: npx --yes tsx@4.20.5 scripts/direct-stage.ts
       - id: reconcile
-        name: Reconcile referee profiles
+        name: Reconcile confirmed referee profiles without caps
         if: always()
         continue-on-error: true
         env: { EVE_STAGE: ref-reconcile }
@@ -102,7 +108,7 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: '22' }
       - run: npm install --no-audit --no-fund
-      - name: Rebuild Best Bets model
+      - name: Stage Best Bets model output
         env: { EVE_STAGE: core }
         run: npx --yes tsx@4.20.5 scripts/direct-stage.ts
 
@@ -115,7 +121,7 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: '22' }
       - run: npm install --no-audit --no-fund
-      - name: Rebuild Market Lab
+      - name: Stage Market Lab model output
         env: { EVE_STAGE: expanded }
         run: npx --yes tsx@4.20.5 scripts/direct-stage.ts
 
@@ -129,7 +135,7 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: '22' }
       - run: npm install --no-audit --no-fund
-      - name: Apply confirmed referee intelligence
+      - name: Apply confirmed referee intelligence without caps
         env: { EVE_STAGE: refine-ref }
         run: npx --yes tsx@4.20.5 scripts/direct-stage.ts
 
@@ -171,7 +177,7 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: '22' }
       - run: npm install --no-audit --no-fund
-      - name: Rebuild Combo Lab from calibrated predictions
+      - name: Rebuild Combo Lab from fresh calibrated predictions
         env: { EVE_STAGE: combos }
         run: npx --yes tsx@4.20.5 scripts/direct-stage.ts
 
