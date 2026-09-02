@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_URL: https://hfmaofmvsmqbxgrwrjqf.supabase.co
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
       ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
     steps:
@@ -22,15 +22,13 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: npm
 
       - name: Install dependencies
-        run: npm ci
+        run: npm install --no-audit --no-fund
 
       - name: Verify direct-scan credentials
         shell: bash
         run: |
-          if [ -z "$SUPABASE_URL" ]; then echo 'MISSING_SECRET: SUPABASE_URL'; exit 2; fi
           if [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then echo 'MISSING_SECRET: SUPABASE_SERVICE_ROLE_KEY'; exit 2; fi
           if [ -z "$ODDS_API_KEY" ]; then echo 'INFO: ODDS_API_KEY not set in GitHub; price refresh will be skipped.'; fi
           echo 'Direct scan credentials available.'
