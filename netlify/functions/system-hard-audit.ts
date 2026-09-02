@@ -86,11 +86,32 @@ export default async()=>{
     if(p.publish_status==='published'&&Date.parse(p.generated_at)<nowMs-MODEL_FRESH_MS) hardViolations.push({type:'upcoming_published_prediction_stale',predictionId:p.id,fixtureId:p.fixture_id,model:p.model_version,generatedAt:p.generated_at})
   }
 
-  const {data:bestBets,error:bestError}=await supabase.from('scanner_best_bets').select('id,fixtureId,kickoffUtc,fairProbability')
-  if(bestError) throw bestError
-  for(const row of bestBets??[]){
+  const [bestResult,expandedResult,stateResult]=await Promise.all([
+    supabase.from('scanner_best_bets').select('id,fixtureId,kickoffUtc,fairProbability'),
+    supabase.from('scanner_expanded_markets').select('id,fixtureId,kickoffUtc,fairProbability'),
+    supabase.from('scanner_publication_state').select('surface,refreshed_at,row_count').in('surface',['best_bets','market_lab']),
+  ])
+  if(bestResult.error) throw bestResult.error
+  if(expandedResult.error) throw expandedResult.error
+  if(stateResult.error) throw stateResult.error
+  const bestBets=bestResult.data??[]
+  const expandedMarkets=expandedResult.data??[]
+  const publicationState=new Map((stateResult.data??[]).map((x:any)=>[x.surface,x]))
+
+  for(const row of bestBets){
     if(Date.parse((row as any).kickoffUtc)<=nowMs) hardViolations.push({type:'best_bets_view_contains_started_fixture',predictionId:(row as any).id,fixtureId:(row as any).fixtureId,kickoff:(row as any).kickoffUtc})
     if((row as any).fairProbability==null) hardViolations.push({type:'best_bets_view_contains_uncalibrated_selection',predictionId:(row as any).id,fixtureId:(row as any).fixtureId})
+  }
+  for(const row of expandedMarkets){
+    if(Date.parse((row as any).kickoffUtc)<=nowMs) hardViolations.push({type:'market_lab_view_contains_started_fixture',predictionId:(row as any).id,fixtureId:(row as any).fixtureId,kickoff:(row as any).kickoffUtc})
+    if((row as any).fairProbability==null) hardViolations.push({type:'market_lab_view_contains_uncalibrated_selection',predictionId:(row as any).id,fixtureId:(row as any).fixtureId})
+  }
+  for(const surface of ['best_bets','market_lab']){
+    const state:any=publicationState.get(surface)
+    if(!state){hardViolations.push({type:'publication_state_missing',surface});continue}
+    if(Date.parse(state.refreshed_at)<nowMs-MODEL_FRESH_MS) hardViolations.push({type:'publication_state_stale',surface,refreshedAt:state.refreshed_at,rowCount:state.row_count})
+    const visibleCount=surface==='best_bets'?bestBets.length:expandedMarkets.length
+    if(visibleCount>Number(state.row_count??0)) hardViolations.push({type:'public_surface_exceeds_published_snapshot',surface,visibleCount,publishedCount:state.row_count})
   }
 
   for(const combo of combos){
@@ -132,7 +153,9 @@ export default async()=>{
     checkedAt:new Date().toISOString(),
     universe:{lookbackHours:3,lookaheadDays:7,fixtures:fixtureRows.length,noFixtureCap:true},
     predictions:predictions.length,snapshots:snapshots.length,combos:combos.length,
-    bestBetsVisible:(bestBets??[]).length,
+    bestBetsVisible:bestBets.length,
+    marketLabVisible:expandedMarkets.length,
+    publicationState:Object.fromEntries(publicationState),
     confirmedReferees:fixtureEvidence.filter((x:any)=>x.refereeConfirmed).length,
     activeRefereeIds:activeRefIds.length,
     activeDuplicateNames:activeDuplicateNames.length,
