@@ -1,0 +1,33 @@
+name: EVE build verification
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package.json
+      - name: Install
+        run: npm install --no-audit --no-fund
+      - name: Frontend build
+        run: npm run build
+      - name: Bundle-check every Netlify function
+        run: >-
+          npx esbuild netlify/functions/*.ts
+          --bundle
+          --platform=node
+          --format=esm
+          --outdir=/tmp/eve-functions-check
+          --external:@supabase/supabase-js
+          --external:ws
