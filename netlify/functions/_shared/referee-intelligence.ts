@@ -126,7 +126,7 @@ export function buildRefereeIntelligence(profile:RefereeProfile|null|undefined,c
   const raw=weightUsed?components.reduce((sum,c)=>sum+c.score*c.weight,0)/weightUsed:50
   const sampleReliability=clamp(sample/15,0,1)
   const completeness=clamp(weightUsed,0,1)
-  const sourceReliability=sources.some((s)=>s==='fotmob-referee-page')?1:(sources.some((s)=>s==='eve-derived')?.96:.90)
+  const sourceReliability=sources.some((s)=>s==='fotmob-referee-page')?1:(sources.some((s)=>s==='eve-derived')?0.96:0.90)
   const reliability=sample>=3?sampleReliability*(.78+.22*completeness)*sourceReliability:0
   const finalScore=50+(raw-50)*reliability
 
