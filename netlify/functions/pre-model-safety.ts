@@ -16,6 +16,24 @@ function chunks<T>(items:T[],size=100){
   return out
 }
 
+async function fotmobLineupState(matchId:string):Promise<'official'|'predicted'|'unknown'> {
+  if(!matchId) return 'unknown'
+  try{
+    const response=await fetch(`https://www.fotmob.com/match/${encodeURIComponent(matchId)}`,{
+      redirect:'follow',
+      headers:{accept:'text/html,application/xhtml+xml','user-agent':'Mozilla/5.0 EVE-Football-Scanner/1.2 lineup-verifier'},
+    })
+    if(!response.ok) return 'unknown'
+    const html=await response.text()
+    // FotMob's public match copy changes from "The current predicted lineups are"
+    // to "The lineups are" once the actual XI is announced. Positive official
+    // evidence is required; unknown pages fail closed.
+    if(/the lineups are\s*:/i.test(html)||/"(?:isLineupConfirmed|lineupConfirmed|isConfirmed)"\s*:\s*true/i.test(html)) return 'official'
+    if(/current predicted lineups are\s*:/i.test(html)||/>\s*Predicted lineup\s*</i.test(html)||/"(?:isPredicted|predicted)"\s*:\s*true/i.test(html)) return 'predicted'
+    return 'unknown'
+  }catch{return 'unknown'}
+}
+
 export default async()=>{
   const supabase=createClient(env('SUPABASE_URL'),env('SUPABASE_SERVICE_ROLE_KEY'),{auth:{persistSession:false,autoRefreshToken:false}})
   const now=new Date()
@@ -23,7 +41,7 @@ export default async()=>{
   const to=new Date(now.getTime()+LOOKAHEAD_MS).toISOString()
 
   const {data:fixtures,error:fixtureError}=await supabase.from('fixtures')
-    .select('id,kickoff,status,home_team_id,away_team_id,referee_id')
+    .select('id,source_fixture_id,kickoff,status,home_team_id,away_team_id,referee_id')
     .in('status',['scheduled','live'])
     .gte('kickoff',from)
     .lte('kickoff',to)
@@ -74,7 +92,9 @@ export default async()=>{
     const latestFotmob=fotmobTimes.length?Math.max(...fotmobTimes):NaN
     const kickoffMs=Date.parse(fixture.kickoff)
     const closeEnough=Number.isFinite(latestFotmob)&&latestFotmob<=kickoffMs+30*60*1000&&(kickoffMs-latestFotmob)<=FOTMOB_OFFICIAL_WINDOW_MS
-    const fotmobOfficial=completeFotmob&&(fixture.status==='live'||closeEnough)
+    let sourceState:'official'|'predicted'|'unknown'='unknown'
+    if(completeFotmob&&fixture.status!=='live'&&closeEnough) sourceState=await fotmobLineupState(String(fixture.source_fixture_id??''))
+    const fotmobOfficial=completeFotmob&&(fixture.status==='live'||(closeEnough&&sourceState==='official'))
     const validConfirmed=completeAll&&(completeManual||fotmobOfficial)
 
     if(context.lineups_confirmed&&!validConfirmed){
@@ -83,9 +103,6 @@ export default async()=>{
     }else if(context.lineups_confirmed&&validConfirmed){
       keptOfficialLineups.push(fixture.id)
     }else if(!context.lineups_confirmed&&rows.some((r:any)=>r.source==='fotmob')&&!fotmobOfficial){
-      // Predicted/provisional FotMob lineups are not retained in the table used by
-      // model intelligence. They can be fetched again when they are close enough
-      // to kickoff to be treated as an official XI candidate.
       lineupRowsToDelete.push(fixture.id)
     }
 
@@ -94,7 +111,7 @@ export default async()=>{
       refereeConfirmed,refereeLinked:Boolean(fixture.referee_id),
       lineupsFlag:Boolean(context.lineups_confirmed),homeStarters:homeAll,awayStarters:awayAll,
       manualComplete:completeManual,fotmobComplete:completeFotmob,fotmobImportedCloseToKickoff:closeEnough,
-      validConfirmedLineup:validConfirmed,
+      fotmobSourceState:sourceState,validConfirmedLineup:validConfirmed,
     })
   }
 
@@ -118,7 +135,7 @@ export default async()=>{
     falseLineupFlagsCleared:new Set(lineupContextsToClear).size,
     provisionalFotmobLineupsRemoved:new Set(lineupRowsToDelete).size,
     verifiedLineupsRetained:new Set(keptOfficialLineups).size,
-    officialFotmobRule:'A FotMob XI is allowed into model intelligence only when it is a complete 11+11 set imported no more than 90 minutes before kickoff (or the match is live). Manual confirmed 11+11 XIs remain valid.',
+    officialFotmobRule:'A FotMob XI needs 11+11 players, must be imported within 90 minutes of kickoff, and FotMob public match data must positively identify the actual lineup rather than a predicted/probable XI. Unknown source state fails closed. Live matches and manually confirmed 11+11 XIs remain valid.',
     details,
   }),{headers:{'content-type':'application/json','cache-control':'no-store'}})
 }
