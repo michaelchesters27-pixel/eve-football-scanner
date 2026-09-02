@@ -9,6 +9,7 @@ function chunks<T>(items:T[],size=100){const out:T[][]=[];for(let i=0;i<items.le
 
 export default async()=>{
   const supabase=createClient(env('SUPABASE_URL'),env('SUPABASE_SERVICE_ROLE_KEY'),{auth:{persistSession:false,autoRefreshToken:false}})
+  const requestedModelVersion=String(process.env.EVE_MODEL_VERSION??'').trim()||null
   const now=new Date(),from=new Date(now.getTime()-LOOKBACK_MS),to=new Date(now.getTime()+LOOKAHEAD_MS)
   const {data:fixtures,error:fixtureError}=await supabase.from('fixtures')
     .select('id,kickoff,referee_id')
@@ -31,17 +32,18 @@ export default async()=>{
   let refined=0
   for(const fixture of targets as any[]){
     try{
-      const result=await refineFixtureRefereeIntelligence(supabase,fixture.id)
+      const result=await refineFixtureRefereeIntelligence(supabase,fixture.id,requestedModelVersion)
       results.push(result)
       refined+=Number(result.refined??0)
     }catch(error){results.push({fixtureId:fixture.id,refined:0,error:error instanceof Error?error.message:String(error)})}
   }
   return new Response(JSON.stringify({
     ok:true,checked:targets.length,refined,
+    modelVersion:requestedModelVersion??'all',
     errors:results.filter((r)=>r.error).length,
     noProcessingCap:true,lookaheadDays:7,
     calibrationPerformedHere:false,
-    note:'This stage only applies confirmed referee intelligence. Calibration and publication happen exactly once in the dedicated calibration jobs.',
+    note:'This stage only applies explicitly confirmed referee intelligence to the requested model. Calibration and publication happen exactly once downstream.',
     results,
   }),{headers:{'content-type':'application/json','cache-control':'no-store'}})
 }
