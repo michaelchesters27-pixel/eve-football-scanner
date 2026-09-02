@@ -432,13 +432,13 @@ function MatchSetupPage({ supabase }: { supabase:any }) {
     }catch(error){setNotice(error instanceof Error?error.message:String(error))}finally{setBusy(false)}
   }
 
-  const setupStatus=selected?matchdayStatus(selected):'Select a fixture. EVE will import referee and official starting XIs automatically close to kickoff.'
+  const setupStatus=selected?matchdayStatus(selected):'Select a fixture. EVE scans every supported fixture in the next four days once per hour.'
   const homeCount=split(homeText).length,awayCount=split(awayText).length
-  const autoActive=selected?hoursUntil(selected.kickoff)<=3&&hoursUntil(selected.kickoff)>=-2.5:false
+  const autoActive=selected?hoursUntil(selected.kickoff)<=96&&hoursUntil(selected.kickoff)>=-3:false
   const refProfile=refIntel?.profile
 
   return <>
-    <PageIntro eyebrow="MATCH-DAY AUTO CONFIRMATION" title="Referee + Starting XI intelligence" text="Manual typing is now the fallback. EVE checks match-day data every 15 minutes, imports the referee and official 11+11 starters, links the referee to historical card/foul evidence where possible, then re-runs the fixture." status={notice||setupStatus}/>
+    <PageIntro eyebrow="HOURLY PRE-MATCH INTELLIGENCE" title="Referee + Starting XI intelligence" text="EVE scans every supported fixture in the next four days once per hour. As soon as referee or official 11+11 data becomes available it is imported, linked to historical referee/player evidence, and any material change triggers a fresh model calculation." status={notice||setupStatus}/>
     <section className="setup-card">
       <label>Fixture<select value={selectedId} onChange={(e)=>setSelectedId(e.target.value)}><option value="">Select fixture</option>{fixtures.map((f)=><option key={f.fixtureId} value={f.fixtureId}>{eventDateLabel(f.kickoff)} · {f.homeTeam} v {f.awayTeam}</option>)}</select></label>
       {selected&&<>
@@ -447,8 +447,8 @@ function MatchSetupPage({ supabase }: { supabase:any }) {
         <div className="matchday-status-panel">
           <div className="matchday-row"><span>Referee</span><strong className={selected.refereeConfirmed?'confirmed-text':'waiting-text'}>{selected.refereeConfirmed?(refIntel?.name??selected.referee??'Confirmed'):'Awaiting referee confirmation'}</strong></div>
           <div className="matchday-row"><span>Starting XIs</span><strong className={selected.lineupsConfirmed?'confirmed-text':'waiting-text'}>{selected.lineupsConfirmed?`CONFIRMED · ${selected.homeStarters} + ${selected.awayStarters} starters`:'AWAITING LINEUP CONFIRMATION'}</strong></div>
-          <div className="matchday-row"><span>Automatic checks</span><strong className={autoActive?'active-text':''}>{selected.refereeConfirmed&&selected.lineupsConfirmed?'MATCH-DAY DATA COMPLETE':autoActive?'ACTIVE · CHECKING EVERY 15 MINUTES':'STARTS ABOUT 3 HOURS BEFORE KICKOFF'}</strong></div>
-          <p>{selected.lineupsConfirmed?'Official starting teams have been imported and EVE has triggered the match-day re-analysis workflow.':'No action is required. EVE will keep the normal pre-match model running and wait for the official teams to be published. Lineups are commonly available around an hour before kickoff, but the scanner keeps checking because release times vary.'}</p>
+          <div className="matchday-row"><span>Automatic checks</span><strong className={autoActive?'active-text':''}>{selected.refereeConfirmed&&selected.lineupsConfirmed?'DATA COMPLETE · HOURLY WATCH ON':autoActive?'ACTIVE · HOURLY PRE-MATCH SCAN':'OUTSIDE 4-DAY SCAN WINDOW'}</strong></div>
+          <p>{selected.lineupsConfirmed?'Official starting teams are loaded. EVE keeps the hourly watch active and re-runs the fixture if material match information changes.':'EVE checks this fixture every hour. A referee is imported as soon as the provider publishes him; official lineups are imported when released. New material information automatically feeds back into Best Bets, Market Lab, calibration and Combo Lab.'}</p>
         </div>
 
         {selected.refereeConfirmed&&<div className="matchday-status-panel">
@@ -480,10 +480,10 @@ function MatchSetupPage({ supabase }: { supabase:any }) {
 }
 
 function matchdayStatus(fixture:SetupFixture){
-  if(fixture.refereeConfirmed&&fixture.lineupsConfirmed)return'Match-day data confirmed — referee and both starting XIs are loaded.'
+  if(fixture.refereeConfirmed&&fixture.lineupsConfirmed)return'Match data complete — referee and both starting XIs are loaded; hourly watch remains active.'
   const hours=hoursUntil(fixture.kickoff)
-  if(hours<=3&&hours>=-2.5)return fixture.lineupsConfirmed?'Starting XIs confirmed — automatic check remains active for referee updates.':'Awaiting lineup confirmation — automatic match-day checks are active.'
-  return 'Pre-match analysis ready — automatic referee/XI checks begin about 3 hours before kickoff.'
+  if(hours<=96&&hours>=-3)return fixture.lineupsConfirmed?'Starting XIs confirmed — hourly scan remains active for referee and match updates.':'Hourly pre-match intelligence scan is active for this fixture.'
+  return 'Pre-match analysis ready — hourly intelligence scanning starts four days before kickoff.'
 }
 
 function ComboLabPage({supabase}:{supabase:any}){
