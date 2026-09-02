@@ -71,8 +71,9 @@ export async function reconcileFixtureReferee(supabase:Supabase,fixtureId:string
   let index=await buildIndex(supabase,true)
   const {data:fixture,error:fixtureError}=await supabase.from('fixtures').select('id,referee_id').eq('id',fixtureId).maybeSingle()
   if(fixtureError||!fixture) throw new Error(fixtureError?.message??'Fixture not found')
-  const {data:context}=await supabase.from('manual_match_context').select('referee_name').eq('fixture_id',fixtureId).maybeSingle()
-  const officialName=String(context?.referee_name??'').trim()
+  const {data:context}=await supabase.from('manual_match_context').select('referee_name,referee_confirmed').eq('fixture_id',fixtureId).maybeSingle()
+  if(!context?.referee_confirmed) return {fixtureId,officialName:null,matched:false,reason:'Referee is not confirmed'}
+  const officialName=String(context.referee_name??'').trim()
   let result=await reconcileWithIndex(supabase,fixture,officialName,index)
   if(!result.matched&&officialName){
     const direct=await hydrateFixtureRefereeProfile(supabase,fixtureId,officialName)
@@ -89,14 +90,18 @@ export async function reconcileFixtureReferee(supabase:Supabase,fixtureId:string
 export async function reconcileActiveReferees(supabase:Supabase){
   const now=new Date()
   const from=new Date(now.getTime()-180*60000).toISOString()
-  const to=new Date(now.getTime()+4*24*3600000).toISOString()
-  const {data:fixtures,error}=await supabase.from('fixtures').select('id,referee_id').in('status',['scheduled','live']).gte('kickoff',from).lte('kickoff',to).order('kickoff',{ascending:true}).limit(120)
+  const to=new Date(now.getTime()+7*24*3600000).toISOString()
+  const {data:fixtures,error}=await supabase.from('fixtures').select('id,referee_id').in('status',['scheduled','live']).gte('kickoff',from).lte('kickoff',to).order('kickoff',{ascending:true})
   if(error) throw error
   const ids=(fixtures??[]).map((f:any)=>f.id)
-  if(!ids.length) return {checked:0,matched:0,changed:0,results:[]}
-  const {data:contexts,error:contextError}=await supabase.from('manual_match_context').select('fixture_id,referee_name,referee_confirmed').in('fixture_id',ids)
-  if(contextError) throw contextError
-  const names=new Map((contexts??[]).filter((c:any)=>c.referee_confirmed&&c.referee_name).map((c:any)=>[c.fixture_id,String(c.referee_name).trim()]))
+  if(!ids.length) return {checked:0,matched:0,changed:0,noProcessingCap:true,results:[]}
+  const contexts:any[]=[]
+  for(let i=0;i<ids.length;i+=100){
+    const {data,error:contextError}=await supabase.from('manual_match_context').select('fixture_id,referee_name,referee_confirmed').in('fixture_id',ids.slice(i,i+100))
+    if(contextError) throw contextError
+    contexts.push(...(data??[]))
+  }
+  const names=new Map(contexts.filter((c:any)=>c.referee_confirmed&&c.referee_name).map((c:any)=>[c.fixture_id,String(c.referee_name).trim()]))
   let index=await buildIndex(supabase,true)
   const results:any[]=[]
   const unmatched:Array<{fixture:any;officialName:string;position:number}>=[]
@@ -110,11 +115,8 @@ export async function reconcileActiveReferees(supabase:Supabase){
     }catch(error){results.push({fixtureId:fixture.id,matched:false,error:error instanceof Error?error.message:String(error)})}
   }
 
-  // Previous code only hydrated unmatched.slice(0,12). When those first twelve
-  // repeatedly failed, every referee after them was starved forever. The JSON-first
-  // hydrator is cheap enough to cover the complete actionable window safely.
   let hydratedAny=false
-  for(const item of unmatched.slice(0,60)){
+  for(const item of unmatched){
     try{
       const direct=await hydrateFixtureRefereeProfile(supabase,item.fixture.id,item.officialName)
       if(direct.hydrated){hydratedAny=true;results[item.position]={...results[item.position],directFotMob:true,direct}}
@@ -128,5 +130,5 @@ export async function reconcileActiveReferees(supabase:Supabase){
       results[item.position]={...results[item.position],...retry,directFotMob:true}
     }
   }
-  return {checked:results.length,matched:results.filter((r:any)=>r.matched).length,changed:results.filter((r:any)=>r.changed).length,results}
+  return {checked:results.length,matched:results.filter((r:any)=>r.matched).length,changed:results.filter((r:any)=>r.changed).length,noProcessingCap:true,lookaheadDays:7,results}
 }
