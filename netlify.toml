@@ -5,6 +5,9 @@
 
 [build.environment]
   NODE_VERSION = "22"
+  # These two VITE values are intentionally shipped to the browser.
+  # Keep server-only keys such as SUPABASE_SERVICE_ROLE_KEY and ODDS_API_KEY scanned.
+  SECRETS_SCAN_OMIT_KEYS = "VITE_SUPABASE_URL,VITE_SUPABASE_PUBLISHABLE_KEY"
 
 [[redirects]]
   from = "/*"
