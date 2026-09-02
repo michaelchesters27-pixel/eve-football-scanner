@@ -1,0 +1,35 @@
+name: EVE post-match results
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '7,22,37,52 * * * *'
+  push:
+    paths:
+      - '.github/workflows/postmatch-results.yml'
+      - 'scripts/direct-stage.ts'
+      - 'netlify/functions/sync-fotmob-results.ts'
+      - 'netlify/functions/settle-results.ts'
+
+concurrency:
+  group: eve-postmatch-results
+  cancel-in-progress: false
+
+env:
+  SUPABASE_URL: https://hfmaofmvsmqbxgrwrjqf.supabase.co
+  SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+jobs:
+  results:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - run: npm install --no-audit --no-fund
+      - name: Verify Supabase credentials
+        run: test -n "$SUPABASE_SERVICE_ROLE_KEY"
+      - name: Refresh completed FotMob fixtures and settle EVE results
+        env: { EVE_STAGE: results }
+        run: npx --yes tsx@4.20.5 scripts/direct-stage.ts
