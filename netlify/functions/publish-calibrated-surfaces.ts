@@ -25,7 +25,21 @@ export default async () => {
     })
   }
 
-  return new Response(JSON.stringify({ ok: true, surface, publication: data }), {
+  const publication = data as { ok?: boolean; rows?: number; surface?: string } | null
+  if (!publication || publication.ok !== true) {
+    return new Response(JSON.stringify({
+      ok: false,
+      surface,
+      rpc,
+      error: 'Publication RPC did not confirm a successful cache replacement',
+      publication,
+    }), {
+      status: 500,
+      headers: { 'content-type': 'application/json', 'cache-control': 'no-store' },
+    })
+  }
+
+  return new Response(JSON.stringify({ ok: true, surface, publication }), {
     headers: { 'content-type': 'application/json', 'cache-control': 'no-store' },
   })
 }
