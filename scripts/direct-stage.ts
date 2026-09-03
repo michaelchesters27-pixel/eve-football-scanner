@@ -81,7 +81,7 @@ async function main(){
     failOnReportedErrors('UNSETTLED RESULT DETAIL RECOVERY',recovery)
     await unwrap('RESULT SETTLEMENT',await settleResults())
   }
-  else if(stage==='audit') await unwrap('SYSTEM HARD AUDIT',await systemHardAudit())
+  else if(stage==='audit') await unwrap('SYSTEM COMPLETE HARD AUDIT',await systemHardAudit())
   else throw new Error(`Unknown EVE_STAGE: ${stage}`)
 
   console.log(`EVE DIRECT STAGE COMPLETE: ${stage}`,new Date().toISOString())
