@@ -1,8 +1,8 @@
 import { createClient } from '@supabase/supabase-js'
 
-// Best Bets prices used to refresh once per day even though the public scanner
-// rejects prices older than 2 hours. Run after the hourly scanner publication
-// instead, with bounded fixture selection and a quota guard.
+// Run after hourly publication. Public scanner views only trust prices captured
+// in the last 2 hours, so successful prices stay inside that window while failed
+// provider lookups use a separate cooldown and never become synthetic/stale odds.
 export const config = { schedule: '23 * * * *' }
 
 type Market = 'cards' | 'corners' | 'goals'
@@ -12,6 +12,7 @@ type Prediction = {
   selection: string
   confidence: number
   data_quality: number
+  fair_probability: number | null
   fixture_id: string
   feature_snapshot_id: string | null
   fixtures: {
@@ -48,14 +49,6 @@ const MAX_FIXTURES_PER_RUN = 4
 const PRICE_HORIZON_HOURS = 48
 const PUBLIC_PRICE_TTL_HOURS = 2
 const MIN_QUOTA_REMAINING = 20
-
-// Conservative probabilities are the 95% Wilson lower bounds from the
-// 2025/26 walk-forward backtest at the live publication thresholds.
-const FAIR_PROBABILITY: Record<Market, number> = {
-  cards: 0.656,
-  corners: 0.670,
-  goals: 0.806,
-}
 
 const SPORT_KEY_BY_LEAGUE: Record<string, string> = {
   'premier-league': 'soccer_epl',
@@ -145,10 +138,11 @@ function requiredMarket(selectionKey: string) {
 
 function outcomeMatches(selectionKey: string, outcome: { name: string; description?: string; point?: number }, home: string, away: string) {
   const point = Number(outcome.point)
-  if (selectionKey === 'over_1_5') return outcome.name.toLowerCase() === 'over' && Math.abs(point - 1.5) < 0.01
-  if (selectionKey === 'second_half_0_5') return outcome.name.toLowerCase() === 'over' && Math.abs(point - 0.5) < 0.01
+  const name = outcome.name.toLowerCase()
+  if (selectionKey === 'over_1_5') return name === 'over' && Math.abs(point - 1.5) < 0.01
+  if (selectionKey === 'second_half_0_5') return name === 'over' && Math.abs(point - 0.5) < 0.01
   if (selectionKey === 'home_corners_4_5' || selectionKey === 'away_corners_4_5') {
-    if (outcome.name.toLowerCase() !== 'over' || Math.abs(point - 4.5) >= 0.01) return false
+    if (name !== 'over' || Math.abs(point - 4.5) >= 0.01) return false
     const team = selectionKey.startsWith('home_') ? home : away
     const descriptor = outcome.description || outcome.name
     return teamSimilarity(team, descriptor) >= 0.55 || normalize(descriptor).includes(normalize(team))
@@ -164,6 +158,17 @@ function refreshIntervalHours(hoursToKickoff: number) {
   return hoursToKickoff <= 8 ? 1 : PUBLIC_PRICE_TTL_HOURS
 }
 
+function failureCooldownHours(hoursToKickoff: number) {
+  if (hoursToKickoff <= 3) return 1
+  if (hoursToKickoff <= 8) return 2
+  if (hoursToKickoff <= 24) return 4
+  return 6
+}
+
+function failureKey(prediction: Prediction) {
+  return `${prediction.fixture_id}:${prediction.feature_snapshots?.selection_key ?? ''}`
+}
+
 function priority(prediction: Prediction, now: Date) {
   const hours = hoursUntil(prediction.fixtures.kickoff, now)
   const urgency = hours <= 3 ? 500 : hours <= 8 ? 360 : hours <= 24 ? 220 : 100
@@ -177,7 +182,7 @@ function quotaIsLow(quota: Quota | null) {
 }
 
 async function apiJson<T>(url: string) {
-  const response = await fetch(url, { headers: { 'user-agent': 'EVE-Football-Scanner/0.6 (fresh-price-value-engine)' } })
+  const response = await fetch(url, { headers: { 'user-agent': 'EVE-Football-Scanner/0.7 (failure-cooldown-value-engine)' } })
   const quota: Quota = {
     remaining: response.headers.get('x-requests-remaining'),
     used: response.headers.get('x-requests-used'),
@@ -193,12 +198,10 @@ async function apiJson<T>(url: string) {
 export default async () => {
   const apiKey = process.env.ODDS_API_KEY
   if (!apiKey) {
-    return new Response(JSON.stringify({
-      ok: false,
-      setupRequired: true,
-      missing: 'ODDS_API_KEY',
-      message: 'Value Engine is built. Add a free The Odds API key to Netlify as ODDS_API_KEY, then run again.',
-    }), { status: 200, headers: { 'content-type': 'application/json' } })
+    return new Response(JSON.stringify({ ok: false, setupRequired: true, missing: 'ODDS_API_KEY' }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })
   }
 
   const supabase = createClient(env('SUPABASE_URL'), env('SUPABASE_SERVICE_ROLE_KEY'), {
@@ -215,13 +218,21 @@ export default async () => {
     const now = new Date()
     const horizon = new Date(now.getTime() + PRICE_HORIZON_HOURS * 3600000)
 
+    const { error: cleanupError } = await supabase
+      .from('odds_price_failures')
+      .delete()
+      .eq('model_version', MODEL)
+      .lt('attempted_at', new Date(now.getTime() - 7 * 86400000).toISOString())
+    if (cleanupError) throw cleanupError
+
     const { data, error } = await supabase
       .from('predictions')
-      .select(`id,market,selection,confidence,data_quality,fixture_id,feature_snapshot_id,
+      .select(`id,market,selection,confidence,data_quality,fair_probability,fixture_id,feature_snapshot_id,
         fixtures!inner(kickoff,status,leagues(slug,name),home:teams!fixtures_home_team_id_fkey(name),away:teams!fixtures_away_team_id_fkey(name)),
         feature_snapshots(selection_key)`)
       .eq('model_version', MODEL)
       .eq('publish_status', 'published')
+      .not('fair_probability', 'is', null)
       .in('fixtures.status', ['scheduled', 'live'])
       .gte('fixtures.kickoff', now.toISOString())
       .lt('fixtures.kickoff', horizon.toISOString())
@@ -230,20 +241,6 @@ export default async () => {
     if (error) throw error
 
     const predictions = (data ?? []) as unknown as Prediction[]
-
-    // Keep the conservative calibrated probability attached to each currently
-    // published core signal. The publication gate still decides which rows exist.
-    for (const market of ['cards', 'corners', 'goals'] as Market[]) {
-      const ids = predictions.filter((p) => p.market === market).map((p) => p.id)
-      if (ids.length) {
-        const { error: probabilityError } = await supabase
-          .from('predictions')
-          .update({ fair_probability: FAIR_PROBABILITY[market] })
-          .in('id', ids)
-        if (probabilityError) throw probabilityError
-      }
-    }
-
     const supported = predictions.filter((p) => requiredMarket(p.feature_snapshots?.selection_key ?? '').length > 0)
     const unsupported = predictions.filter((p) => !requiredMarket(p.feature_snapshots?.selection_key ?? '').length)
 
@@ -263,10 +260,62 @@ export default async () => {
       }
     }
 
+    const latestFailureAt = new Map<string, number>()
+    const fixtureIds = [...new Set(supported.map((p) => p.fixture_id))]
+    if (fixtureIds.length) {
+      const { data: failures, error: failureError } = await supabase
+        .from('odds_price_failures')
+        .select('fixture_id,selection_key,attempted_at')
+        .eq('model_version', MODEL)
+        .in('fixture_id', fixtureIds)
+      if (failureError) throw failureError
+      for (const row of failures ?? []) {
+        latestFailureAt.set(`${row.fixture_id}:${row.selection_key}`, Date.parse(row.attempted_at))
+      }
+    }
+
+    async function recordFailure(prediction: Prediction, reason: string, marketKey: string | null, detail: string) {
+      const selectionKey = prediction.feature_snapshots?.selection_key ?? ''
+      if (!selectionKey) return
+      const { error: failureError } = await supabase.from('odds_price_failures').upsert({
+        model_version: MODEL,
+        fixture_id: prediction.fixture_id,
+        selection_key: selectionKey,
+        market_key: marketKey,
+        attempted_at: new Date().toISOString(),
+        reason,
+        detail: detail.slice(0, 1000),
+      }, { onConflict: 'model_version,fixture_id,selection_key' })
+      if (failureError) throw failureError
+    }
+
+    async function clearFailure(prediction: Prediction) {
+      const selectionKey = prediction.feature_snapshots?.selection_key ?? ''
+      if (!selectionKey) return
+      const { error: failureError } = await supabase.from('odds_price_failures').delete()
+        .eq('model_version', MODEL)
+        .eq('fixture_id', prediction.fixture_id)
+        .eq('selection_key', selectionKey)
+      if (failureError) throw failureError
+    }
+
+    let failureCooldownSkipped = 0
     const duePredictions = supported.filter((p) => {
-      const interval = refreshIntervalHours(hoursUntil(p.fixtures.kickoff, now))
+      const hours = hoursUntil(p.fixtures.kickoff, now)
+      const interval = refreshIntervalHours(hours)
       const latest = latestPriceAt.get(p.id)
-      return !latest || now.getTime() - latest >= interval * 3600000
+      const priceIsDue = !latest || now.getTime() - latest >= interval * 3600000
+      if (!priceIsDue) return false
+
+      const lastFailure = latestFailureAt.get(failureKey(p))
+      if (lastFailure && (!latest || lastFailure > latest)) {
+        const cooldown = failureCooldownHours(hours)
+        if (now.getTime() - lastFailure < cooldown * 3600000) {
+          failureCooldownSkipped += 1
+          return false
+        }
+      }
+      return true
     }).sort((a, b) => priority(b, now) - priority(a, now))
 
     const fixturePriority = new Map<string, number>()
@@ -285,7 +334,9 @@ export default async () => {
       const slug = prediction.fixtures.leagues?.slug ?? ''
       const sportKey = SPORT_KEY_BY_LEAGUE[slug]
       if (!sportKey) {
-        warnings.push(`No odds sport mapping for ${slug}`)
+        const detail = `No odds sport mapping for ${slug}`
+        warnings.push(detail)
+        await recordFailure(prediction, 'unsupported_league', null, detail)
         continue
       }
       const list = bySport.get(sportKey) ?? []
@@ -301,8 +352,7 @@ export default async () => {
     let quotaGuardTriggered = false
 
     outer: for (const [sportKey, sportPredictions] of bySport) {
-      const eventsUrl = `${API}/sports/${sportKey}/events?apiKey=${encodeURIComponent(apiKey)}&dateFormat=iso`
-      const eventsResult = await apiJson<OddsEvent[]>(eventsUrl)
+      const eventsResult = await apiJson<OddsEvent[]>(`${API}/sports/${sportKey}/events?apiKey=${encodeURIComponent(apiKey)}&dateFormat=iso`)
       apiCalls += 1
       lastQuota = eventsResult.quota
       if (quotaIsLow(lastQuota)) {
@@ -315,7 +365,9 @@ export default async () => {
       for (const prediction of sportPredictions) {
         const event = findEvent(prediction, eventsResult.data)
         if (!event) {
-          warnings.push(`No odds event match: ${prediction.fixtures.home?.name} v ${prediction.fixtures.away?.name}`)
+          const detail = `No odds event match: ${prediction.fixtures.home?.name} v ${prediction.fixtures.away?.name}`
+          warnings.push(detail)
+          await recordFailure(prediction, 'no_event_match', requiredMarket(prediction.feature_snapshots?.selection_key ?? '')[0] ?? null, detail)
           continue
         }
         const group = fixtureGroups.get(event.id) ?? { event, predictions: [] }
@@ -328,11 +380,9 @@ export default async () => {
         const markets = [...new Set(eventPredictions.flatMap((p) => requiredMarket(p.feature_snapshots?.selection_key ?? '')))]
         if (!markets.length) continue
 
-        const oddsUrl = `${API}/sports/${sportKey}/events/${event.id}/odds?apiKey=${encodeURIComponent(apiKey)}&regions=uk&markets=${encodeURIComponent(markets.join(','))}&oddsFormat=decimal&dateFormat=iso`
-        const oddsResult = await apiJson<OddsEvent>(oddsUrl)
+        const oddsResult = await apiJson<OddsEvent>(`${API}/sports/${sportKey}/events/${event.id}/odds?apiKey=${encodeURIComponent(apiKey)}&regions=uk&markets=${encodeURIComponent(markets.join(','))}&oddsFormat=decimal&dateFormat=iso`)
         apiCalls += 1
         lastQuota = oddsResult.quota
-        const oddsEvent = oddsResult.data
 
         for (const prediction of eventPredictions) {
           const selectionKey = prediction.feature_snapshots?.selection_key ?? ''
@@ -340,7 +390,7 @@ export default async () => {
           const hours = hoursUntil(prediction.fixtures.kickoff, now)
           const rows: Array<{ prediction_id: string; bookmaker: string; decimal_odds: number; is_closing: boolean }> = []
 
-          for (const bookmaker of oddsEvent.bookmakers ?? []) {
+          for (const bookmaker of oddsResult.data.bookmakers ?? []) {
             let bestForBookmaker = 0
             for (const market of bookmaker.markets ?? []) {
               if (!acceptedMarkets.has(market.key)) continue
@@ -350,18 +400,19 @@ export default async () => {
                 if (Number.isFinite(price) && price > bestForBookmaker) bestForBookmaker = price
               }
             }
-            if (bestForBookmaker > 1) {
-              rows.push({ prediction_id: prediction.id, bookmaker: bookmaker.title, decimal_odds: bestForBookmaker, is_closing: hours <= 2 })
-            }
+            if (bestForBookmaker > 1) rows.push({ prediction_id: prediction.id, bookmaker: bookmaker.title, decimal_odds: bestForBookmaker, is_closing: hours <= 2 })
           }
 
           if (rows.length) {
             const { error: oddsError } = await supabase.from('odds_snapshots').insert(rows)
             if (oddsError) throw oddsError
+            await clearFailure(prediction)
             pricedPredictions += 1
             snapshotsInserted += rows.length
           } else {
-            warnings.push(`No matching price returned: ${prediction.selection} — ${prediction.fixtures.home?.name} v ${prediction.fixtures.away?.name}`)
+            const detail = `No matching price returned: ${prediction.selection} — ${prediction.fixtures.home?.name} v ${prediction.fixtures.away?.name}`
+            warnings.push(detail)
+            await recordFailure(prediction, 'no_compatible_price', [...acceptedMarkets][0] ?? null, detail)
           }
         }
 
@@ -386,7 +437,6 @@ export default async () => {
       ok: true,
       provider: 'The Odds API',
       region: 'uk',
-      fairProbability: FAIR_PROBABILITY,
       schedule: 'hourly after publication',
       horizonHours: PRICE_HORIZON_HOURS,
       publicPriceTtlHours: PUBLIC_PRICE_TTL_HOURS,
@@ -394,6 +444,7 @@ export default async () => {
       liveSignalsInHorizon: predictions.length,
       oddsSupportedSignals: supported.length,
       dueSignalsThisRun: duePredictions.length,
+      failureCooldownSkipped,
       selectedFixtures: selectedFixtureIds.length,
       matchedEvents,
       pricedPredictions,
@@ -402,8 +453,12 @@ export default async () => {
       quota: lastQuota,
       quotaGuardTriggered,
       refreshPolicy: {
-        '0-8h': 'hourly',
-        '8-48h': 'at least every 2 hours',
+        'successful prices 0-8h': 'hourly',
+        'successful prices 8-48h': 'at least every 2 hours',
+        'failed price attempts 0-3h': 'retry after 1 hour',
+        'failed price attempts 3-8h': 'retry after 2 hours',
+        'failed price attempts 8-24h': 'retry after 4 hours',
+        'failed price attempts 24-48h': 'retry after 6 hours',
       },
       unsupportedSignals: unsupported.map((p) => ({
         market: p.market,
@@ -414,7 +469,7 @@ export default async () => {
       })),
       warnings,
       valueRule: 'VALUE requires >=5 percentage-point conservative probability edge and >=5% expected value. STRONG requires >=7pp edge and >=10% EV.',
-      note: 'Best Bets prices now refresh on the same hourly operating cycle as the scanner. No supported published price is intentionally left beyond the public 2-hour trust window, and quota use is bounded by the 48-hour horizon, fixture cap, due-price gating and quota guard.',
+      note: 'Calibration owns fair_probability. This function only prices already-calibrated published signals. Failed provider lookups are cooled down separately so they do not repeatedly consume hourly fixture slots; no stale or synthetic odds are published.',
     }), { headers: { 'content-type': 'application/json' } })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
