@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js'
+import correctExpandedJointMath from './correct-expanded-joint-math'
 
 export const config = { schedule: '49 5 * * *' }
 
@@ -14,7 +15,8 @@ type Prediction = {
 type Recommendation = { threshold: number; n: number; wins: number; hitRate: number; wilsonLow: number }
 
 const MODEL = 'v1-expanded-research'
-const BACKTEST_JOB = 'backtest-2526-v1-expanded'
+const BACKTEST_JOB = 'backtest-2526-v1-expanded-v2'
+const MATH_VERSION = 'v2-selective-2025-26'
 
 function env(name: string) {
   const value = process.env[name]
@@ -34,6 +36,24 @@ function gradeFor(score: number, threshold: number): Grade {
 }
 
 export default async () => {
+  // Production remains on the existing v1 model_version for schema/result-history
+  // continuity, but these three joint markets are corrected to the independently
+  // backtested selective v2 maths immediately before calibration. Fail closed if
+  // that correction cannot complete.
+  const correctionResponse = await correctExpandedJointMath()
+  let correction: any
+  try { correction = await correctionResponse.json() } catch {
+    correction = { ok: false, error: 'Selective v2 correction returned invalid JSON.' }
+  }
+  if (!correctionResponse.ok || !correction?.ok) {
+    return new Response(JSON.stringify({
+      ok: false,
+      calibrationReady: false,
+      mathCorrectionReady: false,
+      error: correction?.error ?? `Selective v2 correction failed with HTTP ${correctionResponse.status}`,
+    }), { status: 500, headers: { 'content-type': 'application/json' } })
+  }
+
   const supabase = createClient(env('SUPABASE_URL'), env('SUPABASE_SERVICE_ROLE_KEY'), {
     auth: { persistSession: false, autoRefreshToken: false },
   })
@@ -48,12 +68,12 @@ export default async () => {
   if (runError) return new Response(JSON.stringify({ ok: false, error: runError.message }), { status: 500, headers: { 'content-type': 'application/json' } })
   const latest = runs?.[0]
   if (!latest?.error_message) {
-    return new Response(JSON.stringify({ ok: false, calibrationReady: false, message: 'Run the expanded walk-forward backtest first.' }), { status: 200, headers: { 'content-type': 'application/json' } })
+    return new Response(JSON.stringify({ ok: false, calibrationReady: false, message: 'Run the selective v2 expanded walk-forward backtest first.' }), { status: 200, headers: { 'content-type': 'application/json' } })
   }
 
   let summary: any
   try { summary = JSON.parse(latest.error_message) } catch {
-    return new Response(JSON.stringify({ ok: false, error: 'Latest expanded backtest summary could not be parsed.' }), { status: 500, headers: { 'content-type': 'application/json' } })
+    return new Response(JSON.stringify({ ok: false, error: 'Latest selective v2 expanded backtest summary could not be parsed.' }), { status: 500, headers: { 'content-type': 'application/json' } })
   }
 
   const recommendations = summary.recommendedThresholds as Partial<Record<Market, Recommendation>>
@@ -116,14 +136,17 @@ export default async () => {
   return new Response(JSON.stringify({
     ok: true,
     calibrationReady: true,
+    mathCorrectionReady: true,
     model: MODEL,
+    mathVersion: MATH_VERSION,
     calibrationSeason: summary.calibrationSeason,
     outOfSampleSeason: summary.outOfSampleSeason,
     backtestFinishedAt: latest.finished_at,
+    correction,
     counts,
     totalEvaluated: rows.length,
     totalPublished,
     lineupGuardrail:'Confirmed XI intelligence may downgrade/veto a calibrated candidate, but it cannot promote a candidate that failed the lineup-neutral walk-forward threshold.',
-    note: 'Expanded markets are hit-rate calibrated from 2025/26 walk-forward data. Fair probability uses the conservative 95% Wilson lower bound. They remain in Market Lab during 2026/27 out-of-sample validation and are not automatically promoted to Best Bets.',
+    note: 'Market Lab uses the selectively corrected v2 maths validated by the 2025/26 strict walk-forward backtest: BTTS and team goals remain unchanged; half goals and match cards remove duplicated opposition evidence; match corners does the same and uses the revalidated 72 threshold. Fair probability remains the conservative 95% Wilson lower bound.',
   }), { headers: { 'content-type': 'application/json' } })
 }
