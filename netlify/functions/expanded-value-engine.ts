@@ -165,6 +165,20 @@ function refreshIntervalHours(hoursToKickoff: number) {
   return hoursToKickoff <= 8 ? 1 : PUBLIC_PRICE_TTL_HOURS
 }
 
+function failureCooldownHours(hoursToKickoff: number) {
+  // A provider saying "no compatible market" is different from a stale price.
+  // Retry aggressively near kickoff, but stop far-away unavailable markets from
+  // consuming the same limited fixture slots every hour.
+  if (hoursToKickoff <= 3) return 1
+  if (hoursToKickoff <= 8) return 2
+  if (hoursToKickoff <= 24) return 4
+  return 6
+}
+
+function failureKey(prediction: Prediction) {
+  return `${prediction.fixture_id}:${prediction.feature_snapshots?.selection_key ?? ''}`
+}
+
 function maxMarketsForFixture(hoursToKickoff: number) {
   if (hoursToKickoff <= 6) return 5
   if (hoursToKickoff <= 24) return 4
@@ -185,7 +199,7 @@ function quotaIsLow(quota: Quota | null) {
 }
 
 async function apiJson<T>(url: string) {
-  const response = await fetch(url, { headers: { 'user-agent': 'EVE-Football-Scanner/0.6 (fresh-price-value-engine)' } })
+  const response = await fetch(url, { headers: { 'user-agent': 'EVE-Football-Scanner/0.7 (failure-cooldown-value-engine)' } })
   const quota: Quota = {
     remaining: response.headers.get('x-requests-remaining'),
     used: response.headers.get('x-requests-used'),
@@ -221,6 +235,13 @@ export default async () => {
     const now = new Date()
     const horizon = new Date(now.getTime() + PRICE_HORIZON_HOURS * 3600000)
 
+    const { error: cleanupError } = await supabase
+      .from('odds_price_failures')
+      .delete()
+      .eq('model_version', MODEL)
+      .lt('attempted_at', new Date(now.getTime() - 7 * 86400000).toISOString())
+    if (cleanupError) throw cleanupError
+
     const { data, error } = await supabase
       .from('predictions')
       .select(`id,market,selection,confidence,data_quality,fair_probability,fixture_id,
@@ -254,10 +275,62 @@ export default async () => {
       }
     }
 
+    const latestFailureAt = new Map<string, number>()
+    const fixtureIds = [...new Set(predictions.map((p) => p.fixture_id))]
+    if (fixtureIds.length) {
+      const { data: failures, error: failureError } = await supabase
+        .from('odds_price_failures')
+        .select('fixture_id,selection_key,attempted_at')
+        .eq('model_version', MODEL)
+        .in('fixture_id', fixtureIds)
+      if (failureError) throw failureError
+      for (const row of failures ?? []) {
+        latestFailureAt.set(`${row.fixture_id}:${row.selection_key}`, Date.parse(row.attempted_at))
+      }
+    }
+
+    async function recordFailure(prediction: Prediction, reason: string, marketKey: string | null, detail: string) {
+      const selectionKey = prediction.feature_snapshots?.selection_key ?? ''
+      if (!selectionKey) return
+      const { error: failureError } = await supabase.from('odds_price_failures').upsert({
+        model_version: MODEL,
+        fixture_id: prediction.fixture_id,
+        selection_key: selectionKey,
+        market_key: marketKey,
+        attempted_at: new Date().toISOString(),
+        reason,
+        detail: detail.slice(0, 1000),
+      }, { onConflict: 'model_version,fixture_id,selection_key' })
+      if (failureError) throw failureError
+    }
+
+    async function clearFailure(prediction: Prediction) {
+      const selectionKey = prediction.feature_snapshots?.selection_key ?? ''
+      if (!selectionKey) return
+      const { error: failureError } = await supabase.from('odds_price_failures').delete()
+        .eq('model_version', MODEL)
+        .eq('fixture_id', prediction.fixture_id)
+        .eq('selection_key', selectionKey)
+      if (failureError) throw failureError
+    }
+
+    let failureCooldownSkipped = 0
     const duePredictions = predictions.filter((p) => {
-      const interval = refreshIntervalHours(hoursUntil(p.fixtures.kickoff, now))
+      const hours = hoursUntil(p.fixtures.kickoff, now)
+      const interval = refreshIntervalHours(hours)
       const latest = latestPriceAt.get(p.id)
-      return !latest || now.getTime() - latest >= interval * 3600000
+      const priceIsDue = !latest || now.getTime() - latest >= interval * 3600000
+      if (!priceIsDue) return false
+
+      const lastFailure = latestFailureAt.get(failureKey(p))
+      if (lastFailure && (!latest || lastFailure > latest)) {
+        const cooldown = failureCooldownHours(hours)
+        if (now.getTime() - lastFailure < cooldown * 3600000) {
+          failureCooldownSkipped += 1
+          return false
+        }
+      }
+      return true
     }).sort((a, b) => priority(b, now) - priority(a, now))
 
     const fixturePriority = new Map<string, number>()
@@ -277,6 +350,7 @@ export default async () => {
       const sportKey = SPORT_KEY_BY_LEAGUE[slug]
       if (!sportKey) {
         warnings.push(`No odds sport mapping for ${slug}`)
+        await recordFailure(prediction, 'unsupported_league', null, `No odds sport mapping for ${slug}`)
         continue
       }
       const list = bySport.get(sportKey) ?? []
@@ -305,7 +379,9 @@ export default async () => {
       for (const prediction of sportPredictions) {
         const event = findEvent(prediction, eventsResult.data)
         if (!event) {
-          warnings.push(`No event match: ${prediction.fixtures.home?.name} v ${prediction.fixtures.away?.name}`)
+          const detail = `No event match: ${prediction.fixtures.home?.name} v ${prediction.fixtures.away?.name}`
+          warnings.push(detail)
+          await recordFailure(prediction, 'no_event_match', requiredMarket(prediction.feature_snapshots?.selection_key ?? ''), detail)
           continue
         }
         const group = groups.get(event.id) ?? { event, predictions: [] }
@@ -356,10 +432,13 @@ export default async () => {
           if (rows.length) {
             const { error: insertError } = await supabase.from('odds_snapshots').insert(rows)
             if (insertError) throw insertError
+            await clearFailure(prediction)
             pricedPredictions += 1
             snapshotsInserted += rows.length
           } else {
-            warnings.push(`No compatible ${marketKey} price: ${prediction.selection} — ${prediction.fixtures.home?.name} v ${prediction.fixtures.away?.name}`)
+            const detail = `No compatible ${marketKey} price: ${prediction.selection} — ${prediction.fixtures.home?.name} v ${prediction.fixtures.away?.name}`
+            warnings.push(detail)
+            await recordFailure(prediction, 'no_compatible_price', marketKey, detail)
           }
         }
 
@@ -391,6 +470,7 @@ export default async () => {
       maxFixturesPerRun: MAX_FIXTURES_PER_RUN,
       calibratedSignalsInHorizon: predictions.length,
       dueSignalsThisRun: duePredictions.length,
+      failureCooldownSkipped,
       deferredSignals: Math.max(0, duePredictions.length - selected.length),
       selectedFixtures: selectedFixtureIds.length,
       matchedFixtures,
@@ -400,12 +480,16 @@ export default async () => {
       quota: lastQuota,
       quotaGuardTriggered,
       refreshPolicy: {
-        '0-8h': 'hourly',
-        '8-48h': 'at least every 2 hours',
+        'successful prices 0-8h': 'hourly',
+        'successful prices 8-48h': 'at least every 2 hours',
+        'failed price attempts 0-3h': 'retry after 1 hour',
+        'failed price attempts 3-8h': 'retry after 2 hours',
+        'failed price attempts 8-24h': 'retry after 4 hours',
+        'failed price attempts 24-48h': 'retry after 6 hours',
       },
       warnings,
       valueRule: 'STRONG VALUE requires >=7 percentage-point probability edge and >=10% EV. VALUE requires >=5pp edge and >=5% EV. Otherwise NO VALUE.',
-      note: 'Only calibrated survivors are priced. No published price is intentionally left longer than the public 2-hour trust window; imminent kickoffs are refreshed hourly and the quota guard still stops the engine if allowance gets low.',
+      note: 'Only calibrated survivors are priced. Public odds remain capped at a 2-hour trust window. Failed provider lookups are stored separately and cooled down so unavailable far-away markets do not repeatedly consume the same hourly fixture slots; no stale or synthetic odds are ever published.',
     }), { headers: { 'content-type': 'application/json' } })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
