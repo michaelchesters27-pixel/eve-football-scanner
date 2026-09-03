@@ -14,7 +14,7 @@ import runCombos from '../netlify/functions/run-combos-safe'
 import syncResults from '../netlify/functions/sync-fotmob-results'
 import recoverResultDetails from '../netlify/functions/recover-unsettled-result-details'
 import settleResults from '../netlify/functions/settle-results'
-import systemHardAudit from '../netlify/functions/system-hard-audit'
+import systemHardAudit from '../netlify/functions/system-hard-audit-complete'
 
 function required(name:string){
   const value=process.env[name]
