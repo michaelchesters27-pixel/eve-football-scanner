@@ -1,7 +1,8 @@
 import { createClient } from '@supabase/supabase-js'
 
-// Run hourly, but the engine itself decides which calibrated fixtures are due
-// for a price refresh. This keeps the free Odds API allowance under control.
+// Run after the hourly publication pass. Public scanner views only trust prices
+// captured in the last 2 hours, so this engine never intentionally waits longer
+// than that between refresh attempts for a published selection.
 export const config = { schedule: '17 * * * *' }
 
 type Prediction = {
@@ -37,11 +38,14 @@ type OddsEvent = {
   }>
 }
 
+type Quota = { remaining: string | null; used: string | null; last: string | null }
+
 const SOURCE = 'the-odds-api-expanded'
 const MODEL = 'v1-expanded-research'
 const API = 'https://api.the-odds-api.com/v4'
 const MAX_FIXTURES_PER_RUN = 4
 const PRICE_HORIZON_HOURS = 48
+const PUBLIC_PRICE_TTL_HOURS = 2
 const MIN_QUOTA_REMAINING = 20
 
 const SPORT_KEY_BY_LEAGUE: Record<string, string> = {
@@ -156,28 +160,15 @@ function hoursUntil(kickoff: string, now: Date) {
 }
 
 function refreshIntervalHours(hoursToKickoff: number) {
-  if (hoursToKickoff <= 3) return 1
-  if (hoursToKickoff <= 8) return 2
-  if (hoursToKickoff <= 24) return 4
-  return 8
+  // Keep comfortably inside the 2h public trust window near kickoff, and never
+  // intentionally exceed that window anywhere in the 48h pricing horizon.
+  return hoursToKickoff <= 8 ? 1 : PUBLIC_PRICE_TTL_HOURS
 }
 
 function maxMarketsForFixture(hoursToKickoff: number) {
   if (hoursToKickoff <= 6) return 5
   if (hoursToKickoff <= 24) return 4
   return 3
-}
-
-function stableBucket(value: string, modulus: number) {
-  let hash = 0
-  for (let i = 0; i < value.length; i += 1) hash = ((hash * 31) + value.charCodeAt(i)) >>> 0
-  return modulus > 0 ? hash % modulus : 0
-}
-
-function inRefreshSlot(fixtureId: string, intervalHours: number, now: Date) {
-  if (intervalHours <= 1) return true
-  const epochHour = Math.floor(now.getTime() / 3600000)
-  return epochHour % intervalHours === stableBucket(fixtureId, intervalHours)
 }
 
 function priority(prediction: Prediction, now: Date) {
@@ -187,15 +178,15 @@ function priority(prediction: Prediction, now: Date) {
   return urgency + fair + prediction.confidence * 0.25 - hours
 }
 
-function quotaIsLow(quota: { remaining: string | null } | null) {
+function quotaIsLow(quota: Quota | null) {
   if (!quota?.remaining) return false
   const remaining = Number(quota.remaining)
   return Number.isFinite(remaining) && remaining <= MIN_QUOTA_REMAINING
 }
 
 async function apiJson<T>(url: string) {
-  const response = await fetch(url, { headers: { 'user-agent': 'EVE-Football-Scanner/0.5 (kickoff-aware-value-engine)' } })
-  const quota = {
+  const response = await fetch(url, { headers: { 'user-agent': 'EVE-Football-Scanner/0.6 (fresh-price-value-engine)' } })
+  const quota: Quota = {
     remaining: response.headers.get('x-requests-remaining'),
     used: response.headers.get('x-requests-used'),
     last: response.headers.get('x-requests-last'),
@@ -244,7 +235,7 @@ export default async () => {
       .limit(120)
     if (error) throw error
 
-    let predictions = ((data ?? []) as unknown as Prediction[])
+    const predictions = ((data ?? []) as unknown as Prediction[])
       .filter((p) => requiredMarket(p.feature_snapshots?.selection_key ?? ''))
 
     const predictionIds = predictions.map((p) => p.id)
@@ -264,15 +255,15 @@ export default async () => {
     }
 
     const duePredictions = predictions.filter((p) => {
-      const hours = hoursUntil(p.fixtures.kickoff, now)
-      const interval = refreshIntervalHours(hours)
+      const interval = refreshIntervalHours(hoursUntil(p.fixtures.kickoff, now))
       const latest = latestPriceAt.get(p.id)
-      if (latest && now.getTime() - latest < interval * 3600000) return false
-      return inRefreshSlot(p.fixture_id, interval, now)
+      return !latest || now.getTime() - latest >= interval * 3600000
     }).sort((a, b) => priority(b, now) - priority(a, now))
 
     const fixturePriority = new Map<string, number>()
-    for (const p of duePredictions) fixturePriority.set(p.fixture_id, Math.max(fixturePriority.get(p.fixture_id) ?? -Infinity, priority(p, now)))
+    for (const p of duePredictions) {
+      fixturePriority.set(p.fixture_id, Math.max(fixturePriority.get(p.fixture_id) ?? -Infinity, priority(p, now)))
+    }
     const selectedFixtureIds = [...fixturePriority.entries()]
       .sort((a, b) => b[1] - a[1])
       .slice(0, MAX_FIXTURES_PER_RUN)
@@ -297,7 +288,7 @@ export default async () => {
     let pricedPredictions = 0
     let snapshotsInserted = 0
     let apiCalls = 0
-    let lastQuota: { remaining: string | null; used: string | null; last: string | null } | null = null
+    let lastQuota: Quota | null = null
     let quotaGuardTriggered = false
 
     outer: for (const [sportKey, sportPredictions] of bySport) {
@@ -357,7 +348,9 @@ export default async () => {
                 if (Number.isFinite(price) && price > bestForBookmaker) bestForBookmaker = price
               }
             }
-            if (bestForBookmaker > 1) rows.push({ prediction_id: prediction.id, bookmaker: bookmaker.title, decimal_odds: bestForBookmaker, is_closing: hours <= 2 })
+            if (bestForBookmaker > 1) {
+              rows.push({ prediction_id: prediction.id, bookmaker: bookmaker.title, decimal_odds: bestForBookmaker, is_closing: hours <= 2 })
+            }
           }
 
           if (rows.length) {
@@ -392,12 +385,13 @@ export default async () => {
       model: MODEL,
       provider: 'The Odds API',
       region: 'uk',
-      schedule: 'hourly with kickoff-aware throttling',
+      schedule: 'hourly after publication',
       horizonHours: PRICE_HORIZON_HOURS,
+      publicPriceTtlHours: PUBLIC_PRICE_TTL_HOURS,
       maxFixturesPerRun: MAX_FIXTURES_PER_RUN,
       calibratedSignalsInHorizon: predictions.length,
       dueSignalsThisRun: duePredictions.length,
-      deferredSignals: Math.max(0, predictions.length - duePredictions.length),
+      deferredSignals: Math.max(0, duePredictions.length - selected.length),
       selectedFixtures: selectedFixtureIds.length,
       matchedFixtures,
       pricedPredictions,
@@ -406,14 +400,12 @@ export default async () => {
       quota: lastQuota,
       quotaGuardTriggered,
       refreshPolicy: {
-        '0-3h': 'hourly',
-        '3-8h': 'every 2 hours',
-        '8-24h': 'every 4 hours',
-        '24-48h': 'every 8 hours',
+        '0-8h': 'hourly',
+        '8-48h': 'at least every 2 hours',
       },
       warnings,
       valueRule: 'STRONG VALUE requires >=7 percentage-point probability edge and >=10% EV. VALUE requires >=5pp edge and >=5% EV. Otherwise NO VALUE.',
-      note: 'Only calibrated survivors are priced. Imminent kickoffs are prioritised, older prices are refreshed more aggressively near kickoff, and the engine stops early if the free odds quota gets low.',
+      note: 'Only calibrated survivors are priced. No published price is intentionally left longer than the public 2-hour trust window; imminent kickoffs are refreshed hourly and the quota guard still stops the engine if allowance gets low.',
     }), { headers: { 'content-type': 'application/json' } })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
