@@ -1,0 +1,31 @@
+name: EVE expanded v2 backtest
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'netlify/functions/run-expanded-backtest-v2.ts'
+      - 'scripts/run-expanded-v2-backtest.ts'
+      - '.github/workflows/expanded-v2-backtest.yml'
+
+permissions:
+  contents: read
+
+env:
+  SUPABASE_URL: https://hfmaofmvsmqbxgrwrjqf.supabase.co
+  SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --no-audit --no-fund
+      - name: Verify Supabase credentials
+        run: test -n "$SUPABASE_SERVICE_ROLE_KEY"
+      - name: Run strict walk-forward v2 backtest
+        run: npx --yes tsx@4.20.5 scripts/run-expanded-v2-backtest.ts
