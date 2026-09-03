@@ -4,6 +4,60 @@ import { auditResultIntegrity } from './_shared/result-integrity-audit'
 
 function env(name:string){ const value=process.env[name]; if(!value) throw new Error(`Missing required environment variable: ${name}`); return value }
 
+async function auditOddsEngines(supabase:any,nowMs:number){
+  const jobs=['expanded-value-engine','value-engine']
+  const {data,error}=await supabase
+    .from('source_sync_runs')
+    .select('job_name,status,started_at,finished_at,error_message')
+    .in('job_name',jobs)
+    .order('started_at',{ascending:false})
+    .limit(30)
+  if(error) throw error
+
+  const latest=new Map<string,any>()
+  for(const row of data??[]){
+    if(!latest.has(row.job_name)) latest.set(row.job_name,row)
+  }
+
+  const hardViolations:any[]=[]
+  const warnings:any[]=[]
+  const summary:any={}
+  const maxAgeMs=3*3600000
+
+  for(const job of jobs){
+    const row=latest.get(job)
+    if(!row){
+      hardViolations.push({type:'odds_engine_missing_run',job})
+      summary[job]={status:'missing',ageHours:null}
+      continue
+    }
+    const started=Date.parse(row.started_at)
+    const ageHours=Number.isFinite(started)?Math.max(0,(nowMs-started)/3600000):null
+    summary[job]={status:row.status,ageHours:ageHours==null?null:Number(ageHours.toFixed(2)),startedAt:row.started_at,finishedAt:row.finished_at}
+
+    if(ageHours==null||nowMs-started>maxAgeMs){
+      hardViolations.push({type:'odds_engine_stale_run',job,status:row.status,startedAt:row.started_at,ageHours})
+      continue
+    }
+    if(row.status==='failed'){
+      hardViolations.push({type:'odds_engine_failed',job,startedAt:row.started_at,error:row.error_message??null})
+      continue
+    }
+    if(row.status==='partial'){
+      warnings.push({type:'odds_engine_partial_provider_coverage',job,startedAt:row.started_at,detail:row.error_message??null})
+    }
+  }
+
+  const {count:recentFailureCount,error:failureError}=await supabase
+    .from('odds_price_failures')
+    .select('*',{count:'exact',head:true})
+    .gte('attempted_at',new Date(nowMs-24*3600000).toISOString())
+  if(failureError) throw failureError
+  summary.recentPriceFailureStates=recentFailureCount??0
+
+  return {hardViolations,warnings,summary}
+}
+
 export default async()=>{
   const baseResponse=await systemHardAudit()
   const baseText=await baseResponse.text()
@@ -11,7 +65,9 @@ export default async()=>{
   try{ base=JSON.parse(baseText) }catch{ base={ok:false,auditPass:false,summary:{},hardViolations:[{type:'base_hard_audit_invalid_response',response:baseText.slice(0,500)}]} }
 
   const supabase=createClient(env('SUPABASE_URL'),env('SUPABASE_SERVICE_ROLE_KEY'),{auth:{persistSession:false,autoRefreshToken:false}})
-  const resultIntegrity=await auditResultIntegrity(supabase,Date.now())
+  const nowMs=Date.now()
+  const resultIntegrity=await auditResultIntegrity(supabase,nowMs)
+  const oddsIntegrity=await auditOddsEngines(supabase,nowMs)
 
   const fixtureEvidence=new Map(
     (Array.isArray(base?.fixtures)?base.fixtures:[]).map((row:any)=>[row?.fixtureId,row])
@@ -53,7 +109,8 @@ export default async()=>{
       return true
     })
 
-  const hardViolations=[...baseViolations,...resultIntegrity.hardViolations]
+  const hardViolations=[...baseViolations,...resultIntegrity.hardViolations,...oddsIntegrity.hardViolations]
+  const operationalWarnings=[...refereeDataWarnings,...oddsIntegrity.warnings]
   const auditPass=hardViolations.length===0
 
   return new Response(JSON.stringify({
@@ -63,11 +120,14 @@ export default async()=>{
     summary:{
       ...(base?.summary??{}),
       resultIntegrity:resultIntegrity.summary,
+      oddsIntegrity:oddsIntegrity.summary,
       refereeDataWarningCount:refereeDataWarnings.length,
+      operationalWarningCount:operationalWarnings.length,
       hardViolationCount:hardViolations.length,
     },
     hardViolations,
     refereeDataWarnings,
+    oddsWarnings:oddsIntegrity.warnings,
   }),{
     status:auditPass?200:500,
     headers:{'content-type':'application/json','cache-control':'no-store'},
