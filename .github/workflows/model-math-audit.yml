@@ -1,0 +1,30 @@
+name: EVE model maths audit
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'scripts/model-math-audit.ts'
+      - '.github/workflows/model-math-audit.yml'
+
+permissions:
+  contents: read
+
+env:
+  SUPABASE_URL: https://hfmaofmvsmqbxgrwrjqf.supabase.co
+  SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+jobs:
+  compare-model-formulas:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --no-audit --no-fund
+      - name: Verify read credentials
+        run: test -n "$SUPABASE_SERVICE_ROLE_KEY"
+      - name: Compare baseline and corrected maths
+        run: npx --yes tsx@4.20.5 scripts/model-math-audit.ts
