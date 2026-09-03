@@ -12,6 +12,7 @@ import applyExpandedCalibration from '../netlify/functions/apply-expanded-calibr
 import publishCalibratedSurfaces from '../netlify/functions/publish-calibrated-surfaces'
 import runCombos from '../netlify/functions/run-combos-safe'
 import syncResults from '../netlify/functions/sync-fotmob-results'
+import recoverResultDetails from '../netlify/functions/recover-unsettled-result-details'
 import settleResults from '../netlify/functions/settle-results'
 import systemHardAudit from '../netlify/functions/system-hard-audit'
 
@@ -76,6 +77,8 @@ async function main(){
   else if(stage==='results'){
     const sync=await unwrap('FOTMOB RESULT REFRESH',await syncResults())
     failOnReportedErrors('FOTMOB RESULT REFRESH',sync)
+    const recovery=await unwrap('UNSETTLED RESULT DETAIL RECOVERY',await recoverResultDetails())
+    failOnReportedErrors('UNSETTLED RESULT DETAIL RECOVERY',recovery)
     await unwrap('RESULT SETTLEMENT',await settleResults())
   }
   else if(stage==='audit') await unwrap('SYSTEM HARD AUDIT',await systemHardAudit())
