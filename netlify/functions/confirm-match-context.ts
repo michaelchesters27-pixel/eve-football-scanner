@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js'
+import { timingSafeEqual } from 'node:crypto'
 import runExpandedMarkets from './run-expanded-markets'
 import applyExpandedCalibration from './apply-expanded-calibration'
 import runCombos from './run-combos'
@@ -6,7 +7,18 @@ import runCombos from './run-combos'
 function env(name:string){ const v=process.env[name]; if(!v) throw new Error(`Missing required environment variable: ${name}`); return v }
 function clean(v:string){ return v.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim().replace(/\s+/g,' ') }
 function slug(v:string){ return clean(v).replace(/ /g,'-') }
-function json(data:any,status=200){ return new Response(JSON.stringify(data),{status,headers:{'content-type':'application/json'}}) }
+function json(data:any,status=200){ return new Response(JSON.stringify(data),{status,headers:{'content-type':'application/json','cache-control':'no-store'}}) }
+
+function authorisedAdmin(request:Request){
+  const configured=String(process.env.EVE_MATCH_SETUP_ADMIN_KEY ?? '').trim()
+  if(!configured) return {ok:false as const,status:503,error:'Manual override security is not configured'}
+  const supplied=String(request.headers.get('x-eve-admin-key') ?? '').trim()
+  if(!supplied) return {ok:false as const,status:401,error:'Admin key required'}
+  const expected=Buffer.from(configured,'utf8')
+  const received=Buffer.from(supplied,'utf8')
+  const valid=expected.length===received.length && timingSafeEqual(expected,received)
+  return valid ? {ok:true as const} : {ok:false as const,status:403,error:'Invalid admin key'}
+}
 
 export default async(request:Request)=>{
   if(request.method!=='POST') return json({ok:false,error:'POST required'},405)
@@ -16,6 +28,12 @@ export default async(request:Request)=>{
       if(new URL(origin).hostname!==new URL(request.url).hostname) return json({ok:false,error:'Same-origin request required'},403)
     }catch{ return json({ok:false,error:'Invalid origin'},403) }
   }
+
+  // This endpoint writes using the Supabase service role, so authentication is
+  // enforced before JSON parsing or any database client is created. Same-origin
+  // alone is not treated as authorization because requests can omit Origin.
+  const auth=authorisedAdmin(request)
+  if(!auth.ok) return json({ok:false,error:auth.error},auth.status)
 
   let body:any
   try{ body=await request.json() }catch{ return json({ok:false,error:'Invalid JSON'},400) }
